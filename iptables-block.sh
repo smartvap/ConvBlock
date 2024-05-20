@@ -29,18 +29,19 @@
 # [Fixed] Sometimes the alias were defined in /etc/profile
 shopt -s expand_aliases
 
+#
+# The configuration of environment variables and aliases takes effect immediately in the current shell environment.
+#
 if [ -f /etc/profile ]; then
    source /etc/profile
 fi
 
-if [ -f ~/.bash_login ]; then
-   source ~/.bash_login
-elif [ -f ~/.bash_profile ]; then
-   source ~/.bash_profile
-fi
-
 if [ -f /etc/bashrc ]; then
    source /etc/bashrc
+fi
+
+if [ -f ~/.bash_profile ]; then
+   source ~/.bash_profile
 fi
 
 if [ -f ~/.bashrc ]; then
@@ -77,6 +78,28 @@ if [ -z "`which jq 2>/dev/null`" ]; then
       echo '[Warn] Failed to install jq!'
       exit 1
    fi
+fi
+
+if [ -z "`which python2 2>/dev/null`" ]; then
+   yum -y install python2
+   if [ -z "`which python2 2>/dev/null`" ]; then
+      echo '[Warn] Failed to install python2!'
+      exit 1
+   fi
+fi
+
+if [ -z "`which pip2 2>/dev/null`" ]; then
+   yum -y install python2-pip
+   if [ -z "`which pip2 2>/dev/null`" ]; then
+      echo '[Warn] Failed to install pip2!'
+      exit 1
+   fi
+fi
+
+pip2 show ipaddress -q 2>/dev/null
+if [ $? -ne 0 ]; then
+   pip2 install ipaddress-1.0.23-py2.py3-none-any.whl -q 2>/dev/null
+   exit 0
 fi
 
 #########################################
@@ -141,7 +164,7 @@ ignIfNames=(
 #
 # 2. Continuous packet capture duration
 #
-duration=3600
+duration=60
 
 #
 # 3. All nodes' IP configurations. This configuration is automatically managed by scripts, please do not manually modify it! The following is a sample configuration, which will be automatically updated when subsequent functions are executed.
@@ -254,7 +277,7 @@ ports_range() {
 get_nodes() {
 
    # The IP of all nodes obtained online
-   local onlNodes=(`timeout 8 kubectl get node -o json 2>/dev/null | jq -r -c '.items[].status.addresses[]|select(.type=="InternalIP")|.address' | sort -u`)
+   local onlNodes=($(kubectl get node --request-timeout=8s -o json 2>/dev/null | jq -r -c '.items[].status.addresses[]|select(.type=="InternalIP")|.address' | sort -u))
 
    if [ ${#onlNodes[@]} -ne 0 ]; then
       # Overwrite local persistent deployment data with dynamically obtained data
@@ -331,7 +354,7 @@ get_host_ip_arr() {
 #
 get_pod_cidr() {
 
-   podCidr=`timeout 8 kubectl get ds calico-node -n kube-system -o json 2>/dev/null | jq -r -c '.spec.template.spec.containers[].env[]|select(.name=="CALICO_IPV4POOL_CIDR")|.value' | head -1`
+   podCidr=`kubectl get ds calico-node -n kube-system --request-timeout=8s -o json 2>/dev/null | jq -r -c '.spec.template.spec.containers[].env[]|select(.name=="CALICO_IPV4POOL_CIDR")|.value' | head -1`
 
    perl -p -i -e "s#^podCidr=.*#podCidr=$podCidr#g" $0
 }
@@ -671,88 +694,141 @@ traff_review() {
 #
 # Dispatch capturing jobs for general nodes
 #
-dispatch_caps() {
-   echo 'Not Implemented Feature'
-}
+# dispatch_caps() {
+#    echo 'Not Implemented Feature'
+# }
 
 #
 # Dispatch capturing jobs for all K8s nodes
 #
-dispatch_k8s_cap_jobs() {
+dispatch_caps() {
 
    # Refresh nodes list
    get_nodes
 
-   # Obtain the file name of current shell
-   local fName=`basename $0`
-
-   # Obtain the file name of current shell without extension name
-   local fNameNoExt=`echo $fName | sed 's/^\(.*\)\.[0-9A-Za-z]*$/\1/g'`
-
-   # Assemble the log file name
-   local logFileName=$fNameNoExt'.log'
-
-   echo -n '[Info] Dispatched capturing jobs to the following nodes'
-
-   # Send currrent shell script to all nodes, and launch the job
-   for node in ${nodes[@]}; do
-      scp -rp $0 $node:$workDir
-      ssh $node "cd $workDir; chmod +x $currFile; nohup ./$currFile --run-host-caps 1>>$logFileName 2>>$logFileName &"
-      echo -n ', '$node
-   done
-
-   echo '[Done]'
-}
-
-#
-# Batch generation of blocking scripts for K8s nodes
-#
-bat_gen_k8s_nodes() {
-
-   # Refresh nodes list
-   get_nodes
+   # Convert array to csv
+   local nodesList=$(echo "${nodes[@]}" | sed 's# #,#g')
 
    # Obtain the pods CIDR
    get_pod_cidr
 
-   for node in ${nodes[@]}; do
-      scp -rp $0 $node:$workDir
-      ssh $node "cd $workDir; chmod +x $currFile; nohup ./$currFile --gen-block-scripts 1>>$logFileName 2>>$logFileName &"
-      echo -n ', '$node
-   done
+   # Obtain the file name of current shell
+   local selfName=$(basename $0)
+
+   # Obtain the file name of current shell without extension name
+   local noExt=$(echo $selfName | sed 's/^\(.*\)\.[0-9A-Za-z]*$/\1/g')
+
+   # Assemble the log file name
+   local logFileName=$noExt'.log'
+
+   # Work Folder
+   local workDir=$(pwd)
+
+   ansible all -i "$nodesList" -m shell -a "mkdir -p $workDir" -f ${#nodes[@]}
+
+   ansible all -i "$nodesList" -m copy -a "src=$0 dest=$workDir/" -f ${#nodes[@]}
+
+   ansible all -i "$nodesList" -m copy -a "src=ipaddress-1.0.23-py2.py3-none-any.whl dest=$workDir/" -f ${#nodes[@]}
+
+   ansible all -i "$nodesList" -m copy -a "src=iprange.py dest=$workDir/" -f ${#nodes[@]}
+
+   ansible all -i "$nodesList" -m shell -a "cd $workDir; chmod +x $selfName; nohup ./$selfName --run-host-caps 1>>$logFileName 2>>$logFileName &" -f ${#nodes[@]}
+
+   ansible all -i "$nodesList" -m shell -a "echo -n 'Capturing processes num: '; ps -ef | grep tcpdump | grep -vE 'grep|timeout' | wc -l" -f ${#nodes[@]} -o
 }
 
-#
-# Batch blocking of K8s nodes
-#
-bat_block_k8s_nodes() {
+qry_cap_proc_num() {
 
    # Refresh nodes list
    get_nodes
 
-   echo '[Info] Begin to implement network strategy blocking: '
+   # Convert array to csv
+   local nodesList=$(echo "${nodes[@]}" | sed 's# #,#g')
 
-   for node in ${nodes[@]}; do
-      ssh $node "cd $workDir; sh ./block.sh"
-      echo -n $node', '
-   done
-
-   echo 'Done.'
+   ansible all -i "$nodesList" -m shell -a "echo -n 'Capturing processes num: '; ps -ef | grep tcpdump | grep -vE 'grep|timeout' | wc -l" -f ${#nodes[@]} -o
 }
 
-
 #
-# 16. Usage
+# Dispatch tasks of blocking scripts generation
 #
-usage() {
+dispatch_gen_tasks() {
 
-   echo 'Network Strategy Convergence and Blocking Tools [v240317]'
-   echo '[Usage]'
-   echo '   [1] '$0' --run-host-caps     Start traffic capture and analysis on the current node.'
-   echo '   [2] '$0' --gen-block-scripts Generate block scripts to block.sh.'
-   echo '   [3] '$0' --disable-block     Unlock all restrictions, rollback the blocking operations.'
+   # Refresh nodes list
+   get_nodes
+
+   # Convert array to csv
+   local nodesList=$(echo "${nodes[@]}" | sed 's# #,#g')
+
+   # Obtain the pods CIDR
+   get_pod_cidr
+
+   # Obtain the file name of current shell
+   local selfName=$(basename $0)
+
+   # Work Folder
+   local workDir=$(pwd)
+
+   ansible all -i "$nodesList" -m shell -a "mkdir -p $workDir" -f ${#nodes[@]}
+
+   ansible all -i "$nodesList" -m copy -a "src=$0 dest=$workDir/" -f ${#nodes[@]}
+
+   ansible all -i "$nodesList" -m shell -a "cd $workDir; chmod +x $selfName; ./$selfName --gen-block-scripts" -f ${#nodes[@]}
+
+   ansible all -i "$nodesList" -m shell -a "cd $workDir; ls -ltr block.sh" -f ${#nodes[@]} -o
 }
 
+#
+# Dispatch iptables block jobs
+#
+dispatch_blocks() {
+
+   # Refresh nodes list
+   get_nodes
+
+   # Convert array to csv
+   local nodesList=$(echo "${nodes[@]}" | sed 's# #,#g')
+
+   # Obtain the pods CIDR
+   get_pod_cidr
+
+   # Obtain the file name of current shell
+   local selfName=$(basename $0)
+
+   # Work Folder
+   local workDir=$(pwd)
+
+   ansible all -i "$nodesList" -m shell -a "mkdir -p $workDir" -f ${#nodes[@]}
+
+   ansible all -i "$nodesList" -m copy -a "src=$0 dest=$workDir/" -f ${#nodes[@]}
+
+   ansible all -i "$nodesList" -m shell -a "cd $workDir; sh block.sh" -f ${#nodes[@]}
+}
+
+#
+# Batchly rollback block operations.
+#
+dispatch_rollbacks() {
+   # Refresh nodes list
+   get_nodes
+
+   # Convert array to csv
+   local nodesList=$(echo "${nodes[@]}" | sed 's# #,#g')
+
+   # Obtain the pods CIDR
+   get_pod_cidr
+
+   # Obtain the file name of current shell
+   local selfName=$(basename $0)
+
+   # Work Folder
+   local workDir=$(pwd)
+
+   ansible all -i "$nodesList" -m shell -a "mkdir -p $workDir" -f ${#nodes[@]}
+
+   ansible all -i "$nodesList" -m copy -a "src=$0 dest=$workDir/" -f ${#nodes[@]}
+
+   ansible all -i "$nodesList" -m shell -a "cd $workDir; chmod +x $selfName; ./$selfName --disable-block" -f ${#nodes[@]}
+}
 
 #########################################
 # Mappings between params and methods   #
@@ -773,30 +849,27 @@ fi
 
 if [[ "${*}" =~ "--get-nodes" ]]; then
    get_nodes
-   echo ${nodes[@]} | sed 's/ /\n/g'
+   echo "[Info] The nodes are as the following:"
+   echo ${nodes[@]} | sed 's/ /\n/g' | sed 's/^/   /g'
    exit 0
 fi
 
 if [[ "${*}" =~ "--get-curr-node-ip" ]]; then
    get_curr_node_ip
-   echo $currNodeIP
+   echo "[Info] The IP of current node: $currNodeIP."
    exit 0
 fi
 
 if [[ "${*}" =~ "--get-host-ip-arr" ]]; then
    arrIpLocal=(`get_host_ip_arr`)
-   echo ${arrIpLocal[@]} | sed 's/ /\n/g'
+   echo "[Info] The local IPs are as the following:"
+   echo ${arrIpLocal[@]} | sed 's/ /\n/g' | sed 's/^/   /g'
    exit 0
 fi
 
 if [[ "${*}" =~ "--get-pod-cidr" ]]; then
    get_pod_cidr
    echo $podCidr
-   exit 0
-fi
-
-if [[ "${*}" =~ "--run-host-caps" ]]; then
-   run_host_caps
    exit 0
 fi
 
@@ -821,16 +894,6 @@ if [[ "${*}" =~ "--add-cntr-plcs" ]]; then
    exit 0
 fi
 
-if [[ "${*}" =~ "--gen-block-scripts" ]]; then
-   gen_block_scripts
-   exit 0
-fi
-
-if [[ "${*}" =~ "--disable-block" ]]; then
-   disable_block
-   exit 0
-fi
-
 if [[ "${*}" =~ "--reserve-iptables" ]]; then
    reserve_iptables
    exit 0
@@ -843,11 +906,6 @@ fi
 
 if [[ "${*}" =~ "--add-cfg-excepts" ]]; then
    add_cfg_excepts
-   exit 0
-fi
-
-if [[ "${*}" =~ "--manual" ]] || [[ "${*}" =~ "--help" ]] || [[ "${*}" =~ "--usage" ]]; then
-   usage
    exit 0
 fi
 
@@ -873,3 +931,56 @@ fi
 # 1121  <------ 134.80.209.11
 # 22 4A
 # 限制目的IP
+
+#
+# 16. Usage
+#
+usage() {
+   echo 'Network Strategy Convergence and Blocking Tools [240520]'
+   echo '[Usage]'
+
+   local selfName=$(basename $0)
+   
+   for opt in ${!mapParaSpec[@]}; do
+      echo "   ./$selfName $opt   ${mapParaSpec[$opt]}"
+   done
+}
+
+#
+# Maps between shell options and functions
+#
+declare -A mapParaFunc=(
+   ["--run-host-caps"]="run_host_caps"
+   ["--gen-block-scripts"]="gen_block_scripts"
+   ["--disable-block"]="disable_block"
+   ["--dispatch-caps"]="dispatch_caps"
+   ["--qry-cap-proc-num"]="qry_cap_proc_num"
+   ["--dispatch-gen-tasks"]="dispatch_gen_tasks"
+   ["--dispatch-blocks"]="dispatch_blocks"
+   ["--dispatch-rollbacks"]="dispatch_rollbacks"
+   ["--usage"]="usage"
+   ["--help"]="usage"
+   ["--manual"]="usage"
+)
+
+#
+# Maps between shell options and specifications
+#
+declare -A mapParaSpec=(
+   ["--run-host-caps"]="Start traffic capture and analysis on the current node."
+   ["--gen-block-scripts"]="Generate block scripts to block.sh."
+   ["--disable-block"]="Unlock all restrictions, rollback the blocking operations."
+   ["--dispatch-caps"]="Dispatch capturing jobs for all K8s nodes."
+   ["--qry-cap-proc-num"]="Query the capturing processes number."
+   ["--dispatch-gen-tasks"]="Dispatch tasks of blocking scripts generation."
+   ["--dispatch-blocks"]="Dispatch iptables block jobs."
+   ["--dispatch-rollbacks"]="Batchly rollback block operations."
+   ["--usage"]="Simplified operation manual."
+   ["--help"]="Simplified operation manual."
+   ["--manual"]="Simplified operation manual."
+)
+
+if [ ! -z "$1" ] && [[ "${!mapParaFunc[@]}" =~ "$1" ]]; then
+   eval ${mapParaFunc["$1"]} $2 $3 $4 $5 $6 $7 $8 $9
+   exit 0
+fi
