@@ -162,7 +162,7 @@ ignIfNames=(
 )
 
 #
-# 2. Continuous packet capture duration
+# 2. Continuous packet capture duration in seconds
 #
 duration=60
 
@@ -185,7 +185,7 @@ podCidr=
 #
 # 6. The Work Folder
 #
-workDir=/root
+workDir=$(pwd)
 
 #########################################
 # Common Routines / Functions area      #
