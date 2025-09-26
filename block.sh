@@ -5,6 +5,12 @@
 #!/bin/bash
 
 ##################################
+# Policies for K8s Nodes         #
+##################################
+
+iptables -t raw -I PREROUTING -p tcp -m iprange --src-range 192.168.80.11-192.168.80.15 -j ACCEPT
+
+##################################
 # Policies for docker containers #
 ##################################
 

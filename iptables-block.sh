@@ -170,12 +170,17 @@ duration=30
 # 3. All nodes' IP configurations. This configuration is automatically managed by scripts, please do not manually modify it! The following is a sample configuration, which will be automatically updated when subsequent functions are executed.
 #
 nodes=(
+   192.168.80.11
+   192.168.80.12
+   192.168.80.13
+   192.168.80.14
+   192.168.80.15
 )
 
 #
 # 4. Current Node's IP. When a backup task is assigned to a node, the IP address of the node can be determined based on the intersection of the IP addresses of the K8s node and all network IP addresses of the current node.
 #
-currNodeIP=
+currNodeIP=192.168.80.11
 
 #
 # 5. The CIDR of K8s pods
@@ -479,7 +484,7 @@ add_k8s_nodes_plcs() {
 
    if [ ${#nodes[@]} -eq 0 ]; then
       echo '[Warn] The nodes list is empty, pls use get_nodes() method to update the list first!'
-      return
+      get_nodes
    fi
 
    get_curr_node_ip
