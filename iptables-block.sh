@@ -164,7 +164,7 @@ ignIfNames=(
 #
 # 2. Continuous packet capture duration in seconds
 #
-duration=60
+duration=30
 
 #
 # 3. All nodes' IP configurations. This configuration is automatically managed by scripts, please do not manually modify it! The following is a sample configuration, which will be automatically updated when subsequent functions are executed.
