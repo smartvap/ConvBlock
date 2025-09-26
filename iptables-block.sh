@@ -617,8 +617,12 @@ gen_block_scripts() {
    # Adding multiple ports blocking policy
    local sLsnPorts=`echo ${lsnPorts[@]} | sed 's/ /,/g'`
    # -A PREROUTING -p tcp -m multiport --dports 3312,4443,50101,51012,51021,61588,6443,80,8001,8008,8443,9091,9093 -j DROP
-   echo "iptables -t raw -A PREROUTING -p tcp -m multiport --dports $sLsnPorts -j DROP" | tee -a block.sh
-
+   # Fix the issue where the multiport module in iptables supports a maximum of 15 ports.
+   IFS=',' read -ra P <<< "$sLsnPorts"
+   for ((i=0;i<${#P[@]};i+=15)); do
+    chunk=$(IFS=,; echo "${P[@]:i:15}")
+    echo "iptables -t raw -A PREROUTING -p tcp -m multiport --dports $chunk -j DROP" | tee -a block.sh
+   done
    echo '[Done]'
 }
 
