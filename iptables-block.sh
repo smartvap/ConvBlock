@@ -614,11 +614,14 @@ gen_block_scripts() {
    # Perform a inspection of all outside listening ports of this host.
    local lsnPorts=(`netstat -an | awk '$1 ~ "tcp" && $4 ~ "'$effLsnIps'" && $NF == "LISTEN" {print $4}' | sed 's/.*:\([0-9]*\)$/\1/g' | sort -u -n`)
 
+   local lsnPortsRanges=(`ports_range "${lsnPorts[@]}"`)
+   echo "lyz===========: ${lsnPortsRanges[@]}"
+   local lsnPortsRanges
    # Adding multiple ports blocking policy
-   local sLsnPorts=`echo ${lsnPorts[@]} | sed 's/ /,/g'`
+   local sLsnPorts=`echo ${lsnPortsRanges[@]} | sed 's/ /,/g'`
    # -A PREROUTING -p tcp -m multiport --dports 3312,4443,50101,51012,51021,61588,6443,80,8001,8008,8443,9091,9093 -j DROP
    # Fix the issue where the multiport module in iptables supports a maximum of 15 ports.
-   IFS=',' read -ra P <<< "$sLsnPorts"
+   IFS=' ' read -ra P <<< "$sLsnPorts"
    for ((i=0;i<${#P[@]};i+=15)); do
     chunk=$(IFS=,; echo "${P[@]:i:15}")
     echo "iptables -t raw -A PREROUTING -p tcp -m multiport --dports $chunk -j DROP" | tee -a block.sh
