@@ -615,18 +615,47 @@ gen_block_scripts() {
    local lsnPorts=(`netstat -an | awk '$1 ~ "tcp" && $4 ~ "'$effLsnIps'" && $NF == "LISTEN" {print $4}' | sed 's/.*:\([0-9]*\)$/\1/g' | sort -u -n`)
 
    local lsnPortsRanges=(`ports_range "${lsnPorts[@]}"`)
-   echo "lyz===========: ${lsnPortsRanges[@]}"
    local lsnPortsRanges
    # Adding multiple ports blocking policy
    local sLsnPorts=`echo ${lsnPortsRanges[@]} | sed 's/ /,/g'`
    # -A PREROUTING -p tcp -m multiport --dports 3312,4443,50101,51012,51021,61588,6443,80,8001,8008,8443,9091,9093 -j DROP
    # Fix the issue where the multiport module in iptables supports a maximum of 15 ports.
-   IFS=' ' read -ra P <<< "$sLsnPorts"
-   for ((i=0;i<${#P[@]};i+=15)); do
-    chunk=$(IFS=,; echo "${P[@]:i:15}")
-    echo "iptables -t raw -A PREROUTING -p tcp -m multiport --dports $chunk -j DROP" | tee -a block.sh
+   # This  module  matches  a  set of source or destination ports.  Up to 15 ports can be specified.  A port range (port:port)
+   # counts as two ports.
+   echo "sLsnPorts: $sLsnPorts"
+   IFS=',' read -ra P <<< "$sLsnPorts"
+   count=0
+   chunk=""
+   for p in "${P[@]}"; do
+    p=${p//-/:}   # 替换成冒号范围
+
+    # 如果已经14个了，且当前是port范围 -> 先输出当前规则，范围放到下一条
+    if ((count == 14)) && [[ $p == *:* ]]; then
+        echo "iptables -t raw -A PREROUTING -p tcp -m multiport --dports $chunk -j DROP" | tee -a block.sh
+        count=0
+        chunk=""
+    fi
+
+    # 加入本次元素
+    [[ -n $chunk ]] && chunk+=","
+    chunk+="$p"
+
+    if [[ $p == *:* ]]; then
+        ((count+=2))
+    else
+        ((count+=1))
+    fi
+
+    if ((count >= 15)); then
+        echo "iptables -t raw -A PREROUTING -p tcp -m multiport --dports $chunk -j DROP" | tee -a block.sh
+        count=0
+        chunk=""
+    fi
    done
-   echo '[Done]'
+   # 输出剩余 chunk
+   if [[ -n $chunk ]]; then
+    echo "iptables -t raw -A PREROUTING -p tcp -m multiport --dports $chunk -j DROP" | tee -a block.sh
+   fi
 }
 
 #
