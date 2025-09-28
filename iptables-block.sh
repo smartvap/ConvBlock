@@ -164,18 +164,23 @@ ignIfNames=(
 #
 # 2. Continuous packet capture duration in seconds
 #
-duration=60
+duration=30
 
 #
 # 3. All nodes' IP configurations. This configuration is automatically managed by scripts, please do not manually modify it! The following is a sample configuration, which will be automatically updated when subsequent functions are executed.
 #
 nodes=(
+   192.168.80.11
+   192.168.80.12
+   192.168.80.13
+   192.168.80.14
+   192.168.80.15
 )
 
 #
 # 4. Current Node's IP. When a backup task is assigned to a node, the IP address of the node can be determined based on the intersection of the IP addresses of the K8s node and all network IP addresses of the current node.
 #
-currNodeIP=
+currNodeIP=192.168.80.11
 
 #
 # 5. The CIDR of K8s pods
@@ -479,7 +484,7 @@ add_k8s_nodes_plcs() {
 
    if [ ${#nodes[@]} -eq 0 ]; then
       echo '[Warn] The nodes list is empty, pls use get_nodes() method to update the list first!'
-      return
+      get_nodes
    fi
 
    get_curr_node_ip
@@ -609,12 +614,48 @@ gen_block_scripts() {
    # Perform a inspection of all outside listening ports of this host.
    local lsnPorts=(`netstat -an | awk '$1 ~ "tcp" && $4 ~ "'$effLsnIps'" && $NF == "LISTEN" {print $4}' | sed 's/.*:\([0-9]*\)$/\1/g' | sort -u -n`)
 
+   local lsnPortsRanges=(`ports_range "${lsnPorts[@]}"`)
+   local lsnPortsRanges
    # Adding multiple ports blocking policy
-   local sLsnPorts=`echo ${lsnPorts[@]} | sed 's/ /,/g'`
+   local sLsnPorts=`echo ${lsnPortsRanges[@]} | sed 's/ /,/g'`
    # -A PREROUTING -p tcp -m multiport --dports 3312,4443,50101,51012,51021,61588,6443,80,8001,8008,8443,9091,9093 -j DROP
-   echo "iptables -t raw -A PREROUTING -p tcp -m multiport --dports $sLsnPorts -j DROP" | tee -a block.sh
+   # Fix the issue where the multiport module in iptables supports a maximum of 15 ports.
+   # This  module  matches  a  set of source or destination ports.  Up to 15 ports can be specified.  A port range (port:port)
+   # counts as two ports.
+   echo "sLsnPorts: $sLsnPorts"
+   IFS=',' read -ra P <<< "$sLsnPorts"
+   count=0
+   chunk=""
+   for p in "${P[@]}"; do
+    p=${p//-/:}   # 替换成冒号范围
 
-   echo '[Done]'
+    # 如果已经14个了，且当前是port范围 -> 先输出当前规则，范围放到下一条
+    if ((count == 14)) && [[ $p == *:* ]]; then
+        echo "iptables -t raw -A PREROUTING -p tcp -m multiport --dports $chunk -j DROP" | tee -a block.sh
+        count=0
+        chunk=""
+    fi
+
+    # 加入本次元素
+    [[ -n $chunk ]] && chunk+=","
+    chunk+="$p"
+
+    if [[ $p == *:* ]]; then
+        ((count+=2))
+    else
+        ((count+=1))
+    fi
+
+    if ((count >= 15)); then
+        echo "iptables -t raw -A PREROUTING -p tcp -m multiport --dports $chunk -j DROP" | tee -a block.sh
+        count=0
+        chunk=""
+    fi
+   done
+   # 输出剩余 chunk
+   if [[ -n $chunk ]]; then
+    echo "iptables -t raw -A PREROUTING -p tcp -m multiport --dports $chunk -j DROP" | tee -a block.sh
+   fi
 }
 
 #
