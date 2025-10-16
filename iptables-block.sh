@@ -185,7 +185,7 @@ currNodeIP=192.168.80.11
 #
 # 5. The CIDR of K8s pods
 #
-podCidr=
+podCidr=196.166.0.0/16
 
 #
 # 6. The Work Folder
@@ -361,6 +361,12 @@ get_pod_cidr() {
 
    podCidr=`kubectl get ds calico-node -n kube-system --request-timeout=8s -o json 2>/dev/null | jq -r -c '.spec.template.spec.containers[].env[]|select(.name=="CALICO_IPV4POOL_CIDR")|.value' | head -1`
 
+   # 判断变量是否为空（包括空字符串或null）
+if [ -z "$podCidr" ] || [ "$podCidr" = "null" ]; then
+    # 如果为空，则执行第二个命令获取值
+    podCidr=$(kubectl get ippool default-ipv4-ippool -o yaml 2>/dev/null | grep -i cidr | awk -F: '{print $2}' | tr -d '[:space:]')
+fi
+    echo "podCidr is "$podCidr >>tcpdump.log
    perl -p -i -e "s#^podCidr=.*#podCidr=$podCidr#g" $0
 }
 
@@ -448,6 +454,8 @@ run_cap() {
 
    # 2. Obtain the K8s pod CIDR filter
    local podCidrFilter=
+   # Call the get_pod_cidr() function to initialize the value of the global variable podCidr
+   get_pod_cidr
    if [ ! -z $podCidr ]; then
       podCidrFilter="and not src net $podCidr"
    fi
@@ -465,7 +473,10 @@ run_cap() {
    # -l: Make stdout line buffered.  Useful if you want to see the data while capturing it.
    # -nn: Don't convert protocol and port numbers etc. to names either.
    # -q: Print less protocol information so output lines are shorter.
+   echo "podCidrFilter= "$podCidrFilter
    local s="timeout $duration tcpdump -i any -lqnn '$1 $nodesFilter $podCidrFilter $cntrFilter'"
+   echo $s >tcpdump.log
+   echo "podCidrFilter= "$podCidrFilter >>tcpdump.log
 
    echo "[Info] The traffic capturing statement: $s."
 
