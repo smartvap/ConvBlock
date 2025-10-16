@@ -358,6 +358,12 @@ get_host_ip_arr() {
 # 4. Obtain the pods CIDR through calico-node yamls
 #
 get_pod_cidr() {
+   
+    # 检查kubectl命令是否存在,如果是普通节点上没有kubectl命令，无法获取，直接复用master节点上的识别结果
+    if ! command -v kubectl &> /dev/null; then
+        echo "kubectl command not found, skipping pod CIDR initialization"
+        return 0  # 命令不存在，不执行后续操作
+    fi
 
    podCidr=`kubectl get ds calico-node -n kube-system --request-timeout=8s -o json 2>/dev/null | jq -r -c '.spec.template.spec.containers[].env[]|select(.name=="CALICO_IPV4POOL_CIDR")|.value' | head -1`
 
