@@ -408,9 +408,10 @@ run_host_caps() {
 
    # If the current node is configured with a port forwarding strategy outside of the explicit listening port, it still needs to be blocked!
    local fwdPorts=(`iptables -t nat -L PREROUTING -n | awk '$1 == "DNAT" {print $0}' | sed 's/.*dpt:\([0-9]*\)\ .*/\1/g' | sort -u -n`)
-
-   # Merge listening ports and forwarding ports
-   local mergedPorts=( ${lsnPorts[@]} ${fwdPorts[@]} )
+   # 考虑第二种目标类型 ：REDIRECT
+   local fwdPorts2=(`iptables -t nat -L PREROUTING -n| awk '$1 == "REDIRECT" {print $0}'| sed -n -E 's/.*dpt:([0-9]+).*/\1/p'| sort -u -n`)
+   # Merge listening ports and forwarding ports and redirect ports
+   local mergedPorts=( ${lsnPorts[@]} ${fwdPorts[@]} ${fwdPorts2[@]} )
 
    # Resort the ports
    local allPorts=(`echo ${mergedPorts[@]} | sed 's/ /\n/g' | sort -u -n`)
