@@ -640,7 +640,6 @@ gen_block_scripts() {
    # Fix the issue where the multiport module in iptables supports a maximum of 15 ports.
    # This  module  matches  a  set of source or destination ports.  Up to 15 ports can be specified.  A port range (port:port)
    # counts as two ports.
-   echo "sLsnPorts: $sLsnPorts"
    IFS=',' read -ra P <<< "$sLsnPorts"
    count=0
    chunk=""
