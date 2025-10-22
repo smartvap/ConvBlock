@@ -248,29 +248,25 @@ set_list_vals() {
    # echo -ne '[Info] Total: '`expr $(echo -ne $escArrVal | wc -l) + 1`' elements.\n'
 }
 
+ports_range() {
+   
+   local ports=($*)
+   local startPort=${ports[0]}
+   local endPort=${ports[0]}
 
-   ports_range() {
-    # 排序并去重
-    local ports=($(printf "%s\n" "$@" | sort -n | uniq))
-    local startPort=${ports[0]}
-    local endPort=${ports[0]}
-
-    for port in "${ports[@]:1}"; do
-        if (( port == endPort + 1 )); then
-            # 连续
-            endPort=$port
-        else
-            # 输出之前的区间
-            if (( startPort == endPort )); then
-                echo -n "$startPort "
-            else
-                echo -n "$startPort-$endPort "
-            fi
-            # 开始新的区间
-            startPort=$port
-            endPort=$port
-        fi
-    done
+   for port in "${ports[@]:1}"; do
+      if ((port == endPort + 1)); then
+         endPort=$port
+      else
+         if ((startPort == endPort)); then
+            echo -n "$startPort "
+         else
+            echo -n "$startPort-$endPort "
+         fi
+         startPort=$port
+         endPort=$port
+      fi
+   done
 
    # The last port range
    if ((startPort == endPort)); then
