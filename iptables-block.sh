@@ -164,23 +164,28 @@ ignIfNames=(
 #
 # 2. Continuous packet capture duration in seconds
 #
-duration=60
+duration=30
 
 #
 # 3. All nodes' IP configurations. This configuration is automatically managed by scripts, please do not manually modify it! The following is a sample configuration, which will be automatically updated when subsequent functions are executed.
 #
 nodes=(
+   192.168.80.11
+   192.168.80.12
+   192.168.80.13
+   192.168.80.14
+   192.168.80.15
 )
 
 #
 # 4. Current Node's IP. When a backup task is assigned to a node, the IP address of the node can be determined based on the intersection of the IP addresses of the K8s node and all network IP addresses of the current node.
 #
-currNodeIP=
+currNodeIP=192.168.80.11
 
 #
 # 5. The CIDR of K8s pods
 #
-podCidr=
+podCidr=196.166.0.0/16
 
 #
 # 6. The Work Folder
@@ -353,9 +358,21 @@ get_host_ip_arr() {
 # 4. Obtain the pods CIDR through calico-node yamls
 #
 get_pod_cidr() {
+   
+    # 检查kubectl命令是否存在,如果是普通节点上没有kubectl命令，无法获取，直接复用master节点上的识别结果
+    if ! command -v kubectl &> /dev/null; then
+        echo "kubectl command not found, skipping pod CIDR initialization"
+        return 0  # 命令不存在，不执行后续操作
+    fi
 
    podCidr=`kubectl get ds calico-node -n kube-system --request-timeout=8s -o json 2>/dev/null | jq -r -c '.spec.template.spec.containers[].env[]|select(.name=="CALICO_IPV4POOL_CIDR")|.value' | head -1`
 
+   # 判断变量是否为空（包括空字符串或null）
+if [ -z "$podCidr" ] || [ "$podCidr" = "null" ]; then
+    # 如果为空，则执行第二个命令获取值
+    podCidr=$(kubectl get ippool default-ipv4-ippool -o yaml 2>/dev/null | grep -i cidr | awk -F: '{print $2}' | tr -d '[:space:]')
+fi
+    echo "podCidr is "$podCidr >>tcpdump.log
    perl -p -i -e "s#^podCidr=.*#podCidr=$podCidr#g" $0
 }
 
@@ -391,9 +408,10 @@ run_host_caps() {
 
    # If the current node is configured with a port forwarding strategy outside of the explicit listening port, it still needs to be blocked!
    local fwdPorts=(`iptables -t nat -L PREROUTING -n | awk '$1 == "DNAT" {print $0}' | sed 's/.*dpt:\([0-9]*\)\ .*/\1/g' | sort -u -n`)
-
-   # Merge listening ports and forwarding ports
-   local mergedPorts=( ${lsnPorts[@]} ${fwdPorts[@]} )
+   # 考虑第二种目标类型 ：REDIRECT
+   local fwdPorts2=(`iptables -t nat -L PREROUTING -n| awk '$1 == "REDIRECT" {print $0}'| sed -n -E 's/.*dpt:([0-9]+).*/\1/p'| sort -u -n`)
+   # Merge listening ports and forwarding ports and redirect ports
+   local mergedPorts=( ${lsnPorts[@]} ${fwdPorts[@]} ${fwdPorts2[@]} )
 
    # Resort the ports
    local allPorts=(`echo ${mergedPorts[@]} | sed 's/ /\n/g' | sort -u -n`)
@@ -443,6 +461,8 @@ run_cap() {
 
    # 2. Obtain the K8s pod CIDR filter
    local podCidrFilter=
+   # Call the get_pod_cidr() function to initialize the value of the global variable podCidr
+   get_pod_cidr
    if [ ! -z $podCidr ]; then
       podCidrFilter="and not src net $podCidr"
    fi
@@ -460,7 +480,10 @@ run_cap() {
    # -l: Make stdout line buffered.  Useful if you want to see the data while capturing it.
    # -nn: Don't convert protocol and port numbers etc. to names either.
    # -q: Print less protocol information so output lines are shorter.
+   echo "podCidrFilter= "$podCidrFilter
    local s="timeout $duration tcpdump -i any -lqnn '$1 $nodesFilter $podCidrFilter $cntrFilter'"
+   echo $s >tcpdump.log
+   echo "podCidrFilter= "$podCidrFilter >>tcpdump.log
 
    echo "[Info] The traffic capturing statement: $s."
 
@@ -479,7 +502,7 @@ add_k8s_nodes_plcs() {
 
    if [ ${#nodes[@]} -eq 0 ]; then
       echo '[Warn] The nodes list is empty, pls use get_nodes() method to update the list first!'
-      return
+      get_nodes
    fi
 
    get_curr_node_ip
@@ -609,12 +632,47 @@ gen_block_scripts() {
    # Perform a inspection of all outside listening ports of this host.
    local lsnPorts=(`netstat -an | awk '$1 ~ "tcp" && $4 ~ "'$effLsnIps'" && $NF == "LISTEN" {print $4}' | sed 's/.*:\([0-9]*\)$/\1/g' | sort -u -n`)
 
+   local lsnPortsRanges=(`ports_range "${lsnPorts[@]}"`)
+   local lsnPortsRanges
    # Adding multiple ports blocking policy
-   local sLsnPorts=`echo ${lsnPorts[@]} | sed 's/ /,/g'`
+   local sLsnPorts=`echo ${lsnPortsRanges[@]} | sed 's/ /,/g'`
    # -A PREROUTING -p tcp -m multiport --dports 3312,4443,50101,51012,51021,61588,6443,80,8001,8008,8443,9091,9093 -j DROP
-   echo "iptables -t raw -A PREROUTING -p tcp -m multiport --dports $sLsnPorts -j DROP" | tee -a block.sh
+   # Fix the issue where the multiport module in iptables supports a maximum of 15 ports.
+   # This  module  matches  a  set of source or destination ports.  Up to 15 ports can be specified.  A port range (port:port)
+   # counts as two ports.
+   IFS=',' read -ra P <<< "$sLsnPorts"
+   count=0
+   chunk=""
+   for p in "${P[@]}"; do
+    p=${p//-/:}   # 替换成冒号范围
 
-   echo '[Done]'
+    # 如果已经14个了，且当前是port范围 -> 先输出当前规则，范围放到下一条
+    if ((count == 14)) && [[ $p == *:* ]]; then
+        echo "iptables -t raw -A PREROUTING -p tcp -m multiport --dports $chunk -j DROP" | tee -a block.sh
+        count=0
+        chunk=""
+    fi
+
+    # 加入本次元素
+    [[ -n $chunk ]] && chunk+=","
+    chunk+="$p"
+
+    if [[ $p == *:* ]]; then
+        ((count+=2))
+    else
+        ((count+=1))
+    fi
+
+    if ((count >= 15)); then
+        echo "iptables -t raw -A PREROUTING -p tcp -m multiport --dports $chunk -j DROP" | tee -a block.sh
+        count=0
+        chunk=""
+    fi
+   done
+   # 输出剩余 chunk
+   if [[ -n $chunk ]]; then
+    echo "iptables -t raw -A PREROUTING -p tcp -m multiport --dports $chunk -j DROP" | tee -a block.sh
+   fi
 }
 
 #
