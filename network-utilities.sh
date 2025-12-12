@@ -631,13 +631,20 @@ get_current_ip_environment() {
 
    # Option 1: Attempt to extract from the default routing network interface
    DEFAULT_NETWORK_INTERFACE=$(ip $([ "$PREFER_IPV6" = "true" ] && echo "-6") route | awk '$1 == "default" {print $5}')
+   echo "[Info] The default routing network interface name is: ${DEFAULT_NETWORK_INTERFACE}."
 
    # If obtaining the default routing network card fails, it means that option 2 needs to be taken, which is to extract from the external address list
    if [ ! -z "${DEFAULT_NETWORK_INTERFACE}" ]; then
 
       CURRENT_IPV4=$(ip a show dev ${DEFAULT_NETWORK_INTERFACE} | grep -w 'inet' | grep -v -w 'secondary' | sed 's#.*inet \([^/]*\)/[0-9]*.*#\1#g' | head -1)
+      echo "[Info] The primary IPv4 address of ${DEFAULT_NETWORK_INTERFACE} is ${CURRENT_IPV4:-<empty>}."
+
       IFS=$'\n' ADDITIONAL_IPV4=($(ip a show dev ${DEFAULT_NETWORK_INTERFACE} | grep -w 'inet' | grep -w 'secondary' | sed 's#.*inet \([^/]*\)/[0-9]*.*#\1#g'))
+      echo "[Info] The additional IPv4 addresses of ${DEFAULT_NETWORK_INTERFACE} is ${ADDITIONAL_IPV4[@]:-<empty>}."
+
       CURRENT_IPV6=$(ip a show dev ${DEFAULT_NETWORK_INTERFACE} | grep -w 'inet6' | grep -v -w 'secondary' | grep -v 'fe80' | sed 's#.*inet6 \([^/]*\)/[0-9]*.*#\1#g' | head -1)
+      echo "[Info] The primary IPv6 address of ${DEFAULT_NETWORK_INTERFACE} is ${CURRENT_IPV6:-<empty>}."
+
       IFS=$'\n' ADDITIONAL_IPV6=($(ip a show dev ${DEFAULT_NETWORK_INTERFACE} | grep -w 'inet6' | grep -w 'secondary' | grep -v 'fe80' | sed 's#.*inet6 \([^/]*\)/[0-9]*.*#\1#g'))
 
       [ "${PREFER_IPV6}" = "false" ] && CURRENT_IP=${CURRENT_IPV4}
