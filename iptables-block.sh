@@ -5,7 +5,7 @@
 
 #!/bin/bash
 
-# [Note] Packets dump --> Analyze --> Block IPTABLES
+# [Note] working principle: Capture Data Packets → Generate iptables blocking execution plan → Implement blockage
 
 #########################################
 # Bugs, Defects and Other Problems      #
@@ -19,6 +19,26 @@
 # [6] Add manually backup functions
 # [7] udp is not properly handled!
 # [8] multiport optimize
+# [9] The local link addresses 127.0.0.0/8 and fe80::/10 are both loopback address networks, and traffic passing through these addresses should be filtered
+# [10] Interpretability of IP quintuple data;
+# [11] iptables -t raw -I PREROUTING -p tcp -s 2001:db8:abc1::/64 -j ACCEPT # Standalone docker policies 
+# [12] The blocking of IPv6 addresses requires the use of the ip6tables command.
+# [13] The function of automatically revoking blockage within 5 minutes;
+# [14] Add comment to all generated strategies.
+# [15] netstat -anltp needs to be replaced with ss -nltp to improve the query efficiency and accuracy of the listening ports
+# [16] External IP is based on existing generation logic, with nodeport port listening and nodeport iptables (newer k8s version)
+
+#########################################
+# Verifications                         #
+#########################################
+
+# Sort by age to obtain the oldest pods
+kubectl get pods --all-namespaces --no-headers --sort-by={.metadata.creationTimestamp} | head -5
+
+# Patch the deploy
+kubectl patch deploy beegrid-chat-service -n beegrid --type='json' -p='[{"op": "replace", "path": "/spec/template/spec/containers/0/ports", "value": [{"containerPort": 7007, "hostPort": 57007, "protocol": "TCP"}]}]'
+kubectl get pod -n beegrid -o wide | grep '^beegrid-chat-service'
+
 
 #########################################
 # Environment variable setting area     #
@@ -56,50 +76,47 @@ fi
 # Dependency components detection area  #
 #########################################
 
-if [ -z "`which tcpdump 2>/dev/null`" ]; then
-   yum -y install tcpdump
-   if [ -z "`which tcpdump 2>/dev/null`" ]; then
-      echo '[Warn] Failed to install tcpdump!'
-      exit 1
-   fi
+# [Note] In some operating systems such as the debian ecosystem, which cannot obtain alias configuration data. Therefore, alias requires special handling
+
+if [ -z "$(which tcpdump 2>/dev/null)" ] && [ -z "$(alias tcpdump 2>/dev/null)" ]; then
+   echo '[Warn] tcpdump is not installed yet.'
+   exit -1
 fi
 
-if [ -z "`which lsof 2>/dev/null`" ]; then
-   yum -y install lsof
-   if [ -z "`which lsof 2>/dev/null`" ]; then
-      echo '[Warn] Failed to install lsof!'
-      exit 1
-   fi
+if [ -z "$(which lsof 2>/dev/null)" ] && [ -z "$(alias lsof 2>/dev/null)" ]; then
+   echo '[Warn] lsof is not installed yet.'
+   exit -1
 fi
 
-if [ -z "`which jq 2>/dev/null`" ]; then
-   yum -y install jq
-   if [ -z "`which jq 2>/dev/null`" ]; then
-      echo '[Warn] Failed to install jq!'
-      exit 1
-   fi
+if [ -z "$(which jq 2>/dev/null)" ] && [ -z "$(alias jq 2>/dev/null)" ]; then
+   echo '[Warn] jq is not installed yet.'
+   exit -1
 fi
 
-if [ -z "`which python2 2>/dev/null`" ]; then
-   yum -y install python2
-   if [ -z "`which python2 2>/dev/null`" ]; then
-      echo '[Warn] Failed to install python2!'
-      exit 1
-   fi
+if [ -z "$(which yq 2>/dev/null)" ] && [ -z "$(alias yq 2>/dev/null)" ]; then
+   echo '[Warn] yq is not installed yet.'
+   exit -1
 fi
 
-if [ -z "`which pip2 2>/dev/null`" ]; then
-   yum -y install python2-pip
-   if [ -z "`which pip2 2>/dev/null`" ]; then
-      echo '[Warn] Failed to install pip2!'
-      exit 1
-   fi
+if [ -z "$(which python2 2>/dev/null)" ] && [ -z "$(alias python2 2>/dev/null)" ]; then
+   echo '[Warn] python2 is not installed yet.'
+   exit -1
+fi
+
+if [ -z "$(which pip2 2>/dev/null)" ] && [ -z "$(alias pip2 2>/dev/null)" ]; then
+   echo '[Warn] python2-pip is not installed yet.'
+   exit -1
 fi
 
 pip2 show ipaddress -q 2>/dev/null
 if [ $? -ne 0 ]; then
    pip2 install ipaddress-1.0.23-py2.py3-none-any.whl -q 2>/dev/null
-   exit 0
+   exit -1
+fi
+
+if [ -z "$(which kubectl 2>/dev/null)" ] && [ -z "$(alias kubectl 2>/dev/null)" ]; then
+   echo '[Warn] The current script depends on running on a node that deploys kubectl and has administrative privileges on the K8s cluster.'
+   exit -1
 fi
 
 #########################################
@@ -159,6 +176,13 @@ ignIfNames=(
 
    # Loopback
    '^lo$'
+
+   # ipvs
+   '^kube-ipvs'
+
+   'vmnet'
+
+   '^dummy'
 )
 
 #
@@ -167,57 +191,77 @@ ignIfNames=(
 duration=60
 
 #
-# 3. All nodes' IP configurations. This configuration is automatically managed by scripts, please do not manually modify it! The following is a sample configuration, which will be automatically updated when subsequent functions are executed.
+# 3. All nodes' IP configurations. This configuration is automatically managed by scripts, please do not manually modify it! The following is a sample configuration, which will be automatically updated when subsequent functions are executed. The followings are demo node IP addresses.
 #
 nodes=(
-   192.168.80.11
-   192.168.80.12
-   192.168.80.13
-   192.168.80.14
-   192.168.80.15
 )
 
 #
 # 4. Current Node's IP. When a backup task is assigned to a node, the IP address of the node can be determined based on the intersection of the IP addresses of the K8s node and all network IP addresses of the current node.
 #
-currNodeIP=192.168.80.14
+currNodeIP=
 
 #
 # 5. The CIDR of K8s pods
 #
-podCidr=196.166.0.0/16
+podCidr=
 
 #
 # 6. The Work Folder
 #
-workDir=$(pwd)
+WORKING_DIRECTORY=$(dirname $(realpath $0))
+if [ $? -ne 0 ]; then
+   WORKING_DIRECTORY=$(pwd)
+fi
+
+#
+# [Note] A list of Container Network Interface (CNI) plugins. Simply put, its main function is to provide a collection of common options for networking solutions for Kubernetes clusters.
+#
+CNI_TYPES=(
+   Calico
+   Flannel
+   Cilium
+   Weave
+   Antrea
+   Canal
+   Kube-router
+   OVN-Kubernetes
+)
+
+#
+# [Note] The subnets on Loopback Interface. The system service can listen at address 127.0.0.0/8, so that the service is only available locally and will not be exposed to external networks, improving security. Use ip a show lo to get the subnets addresses. Not strict mode.
+#
+LOOPBACK_SUBNETS_IPV4=127.0.0.1/8
+LOOPBACK_SUBNETS_IPV6=::1/128
+
+PREFER_IPV6=false
 
 # 定义全局变量,标识k8s集群nodePort类型的service的端口号是否能被netstat检查到
-k8s_svc_nodeport_can_be_seen_netstat=false
+# k8s_svc_nodeport_can_be_seen_netstat=false
 
 #########################################
 # 用于封堵panji名称空间端口用到的变量       #
 #########################################
 
 # 全局变量：存储暴露的端口数组
-pj_port=(53 5473 6666 9153 9999 22365)
+# pj_port=(53 5473 6666 9153 9999 22365)
 
 # 预先定义需要查询的命名空间,如果磐基名称空间有变化，可以手动修改维护这个名称空间数组
-namespaces=("chaosblade" "default" "istio-system" "kube-node-lease" "kube-public" "kube-system" "monitor-ns" "nfs-provisioner-ns" "paas-admin" "paas-ec" "paas-middleware" "paas-monitor" "paas-public")
+# namespaces=("chaosblade" "default" "istio-system" "kube-node-lease" "kube-public" "kube-system" "monitor-ns" "nfs-provisioner-ns" "paas-admin" "paas-ec" "paas-middleware" "paas-monitor" "paas-public")
 
 # 输出文件路径
-pj_output_file="pj-port-svc-mapper.txt"
+# pj_output_file="pj-port-svc-mapper.txt"
 
 # 定义布尔变量，初始值为假,如果传入的参数指明只封堵磐基名称空间的端口，这个变量就为true
-Block_only_panji=false
+# Block_only_panji=false
 
 # 查找指定命名空间中暴露在宿主机的端口及对应服务关系
 # 结果会赋值给全局变量 pj_port
 
 # k8s svc nodePort类型的端口，如果通过netstat 找不到，需要用到的全局变量：存储所有命名空间暴露的宿主机端口（去重排序后）
-all_ns_port=(53 5473 6666 9153 22365)
+# all_ns_port=(53 5473 6666 9153 22365)
 # 定义输出文件路径（可根据需求修改）
-output_file="./k8s_exposed_ports_mapping.txt"
+# output_file="./k8s_exposed_ports_mapping.txt"
 
 # 函数：收集所有命名空间的暴露端口（NodePort/HostPort/HostNetwork）
 find_all_ns_exposed_host_ports_with_mapping() {
@@ -459,104 +503,544 @@ ports_range() {
 #
 # 2. Get IP of all nodes. The current function adopts a passive update method. If the acquisition of the K8s node IP address table fails due to abnormalities, the original data will be retained and not overwritten.
 #
-get_nodes() {
+# get_nodes() {
 
-   # The IP of all nodes obtained online
-   local onlNodes=($(kubectl get node --request-timeout=8s -o json 2>/dev/null | jq -r -c '.items[].status.addresses[]|select(.type=="InternalIP")|.address' | sort -u))
+#    # The IP of all nodes obtained online
+#    local onlineNodes=($(kubectl get node --request-timeout=8s -o json 2>/dev/null | jq -r -c '.items[].status.addresses[]|select(.type=="InternalIP")|.address' | sort -u))
 
-   if [ ${#onlNodes[@]} -ne 0 ]; then
-      # Overwrite local persistent deployment data with dynamically obtained data
-      nodes=(${onlNodes[@]})
-      set_list_vals "nodes" "${nodes[@]}"
-   fi
+#    # Overwrite local persistent deployment data with dynamically obtained data
+#    set_list_vals "nodes" "${onlineNodes[@]}"
+# }
 
-   if [ ${#nodes[@]} -eq 0 ]; then
-      echo '[Warn] Cannot find any nodes in this k8s cluster! The current functionality relies on the K8s core process to be running!'
-      exit 1
+#
+# 2. Reload the k8s nodes IP list from k8s masters, and dump the list into the configuration file
+#
+dump_k8s_nodes() {
+
+   kubectl get node --request-timeout=8s -o json 2>/dev/null | jq -r -c '.items[].status.addresses[]|select(.type=="InternalIP")|.address' 2>/dev/null > ${WORKING_DIRECTORY}/.k8s-nodes
+   K8S_NODES=($(cat ${WORKING_DIRECTORY}/.k8s-nodes 2>/dev/null))
+}
+
+#
+# [Note] Without conducting data validity checks, there is no ability to identify dirty data.
+#
+get_k8s_nodes() {
+
+   K8S_NODES=($(cat ${WORKING_DIRECTORY}/.k8s-nodes 2>/dev/null))
+   if [ ${#K8S_NODES[@]} -eq 0 ]; then
+      dump_k8s_nodes
    fi
 }
 
 #
 # 3. Get the IP of current node
 #
-get_curr_node_ip() {
+# get_curr_node_ip() {
 
-   # Remove the previous settings
-   currNodeIP=
-   perl -p -i -e 's/^currNodeIP=.*/currNodeIP=/g' $0
+#    # Remove the previous settings
+#    currNodeIP=
+#    perl -p -i -e 's/^currNodeIP=.*/currNodeIP=/g' $0
 
-   # Obtain K8s cluster nodes' IP
-   get_nodes
+#    # Obtain K8s cluster nodes' IP
+#    get_nodes
 
-   if [ ${#nodes[@]} -eq 0 ]; then
-      exit 1
-   fi
+#    if [ ${#nodes[@]} -eq 0 ]; then
+#       exit 1
+#    fi
 
-   # Obtain all IPs of all interfaces
-   local ipArr=(`ip a | grep inet | grep -E -o '([0-9a-fA-F:]+)/[0-9]{1,3}|([0-9]{1,3}\.){3}[0-9]{1,3}/[0-9]{1,2}' | awk -F'/' '{print $1}' | grep -vE '127.0.0.1|::1' | sort | uniq`)
+#    # Obtain all IPs of all interfaces
+#    local ipArr=(`ip a | grep inet | grep -E -o '([0-9a-fA-F:]+)/[0-9]{1,3}|([0-9]{1,3}\.){3}[0-9]{1,3}/[0-9]{1,2}' | awk -F'/' '{print $1}' | grep -vE '127.0.0.1|::1' | sort | uniq`)
 
-   if [ ${#ipArr[@]} -eq 0 ]; then
-      echo '[Warn] Cannot obtain the IPs of all interfaces!'
-      exit 1
-   fi
+#    if [ ${#ipArr[@]} -eq 0 ]; then
+#       echo '[Warn] Cannot obtain the IPs of all interfaces!'
+#       exit 1
+#    fi
 
-   # Solving the intersection of K8s cluster node IP and current node interface IP
-   local intersect=(`echo ${nodes[*]} ${ipArr[*]} | sed 's/ /\n/g' | sort | uniq -c | awk '$1!=1{print $2}'`)
+#    # Solving the intersection of K8s cluster node IP and current node interface IP
+#    local intersect=(`echo ${nodes[*]} ${ipArr[*]} | sed 's/ /\n/g' | sort | uniq -c | awk '$1!=1{print $2}'`)
 
-   if [ ${#intersect[@]} -gt 1 ]; then
-      echo '[Warn] A node should not have more than 1 K8s cluster node IPs!'
-      exit 1
-   elif [ ${#intersect[@]} -eq 0 ]; then
-      echo '[Warn] Although the current node has K8s management permissions, it does not belong to the K8s node.'
-      exit 1
-   fi
+#    if [ ${#intersect[@]} -gt 1 ]; then
+#       echo '[Warn] A node should not have more than 1 K8s cluster node IPs!'
+#       exit 1
+#    elif [ ${#intersect[@]} -eq 0 ]; then
+#       echo '[Warn] Although the current node has K8s management permissions, it does not belong to the K8s node.'
+#       exit 1
+#    fi
 
-   currNodeIP=${intersect[@]:0:1}
-   perl -p -i -e "s/^currNodeIP=.*/currNodeIP=$currNodeIP/g" $0
-}
+#    currNodeIP=${intersect[@]:0:1}
+#    perl -p -i -e "s/^currNodeIP=.*/currNodeIP=$currNodeIP/g" $0
+# }
 
 #
 # 3. Obtain IP addresses of effective network interfaces
 #
-get_host_ip_arr() {
+# get_host_ip_arr() {
 
-   # The expression of ignored interface names
-   local expIfNames=`echo ${ignIfNames[@]} | sed 's/ /|/g'`
+#    # The expression of ignored interface names
+#    local expIfNames=`echo ${ignIfNames[@]} | sed 's/ /|/g'`
 
-   # The effective interface names
-   local effIfNames=(`ip link show | grep -E '^[0-9]+:' | sed 's/^[0-9^\ ]*: \(.*\):.*/\1/g' | grep -vE $expIfNames`)
+#    # The effective interface names
+#    local effIfNames=(`ip link show | grep -E '^[0-9]+:' | sed 's/^[0-9^\ ]*: \(.*\):.*/\1/g' | grep -vE $expIfNames`)
 
-   local arrIpLocal=()
-   for ifName in ${effIfNames[@]}; do
-      arrIpLocal+=(`ip address show $ifName | grep inet | grep -E -o '([0-9a-fA-F:]+)/[0-9]{1,3}|([0-9]{1,3}\.){3}[0-9]{1,3}/[0-9]{1,2}' | awk -F'/' '{print $1}' | grep -vE '127.0.0.1|::1' | sort | uniq`)
-   done
+#    local arrIpLocal=()
+#    for ifName in ${effIfNames[@]}; do
+#       arrIpLocal+=(`ip address show $ifName | grep inet | grep -E -o '([0-9a-fA-F:]+)/[0-9]{1,3}|([0-9]{1,3}\.){3}[0-9]{1,3}/[0-9]{1,2}' | awk -F'/' '{print $1}' | grep -vE '127.0.0.1|::1' | sort | uniq`)
+#    done
 
-   echo ${arrIpLocal[@]}
+#    echo ${arrIpLocal[@]}
+# }
+
+get_external_ip_addresses() {
+   
+   ${WORKING_DIRECTORY}/network-utilities.sh --save-external-ip-addresses
+   EXTERNAL_IP_ADDRESSES=($(cat ${WORKING_DIRECTORY}/.external-ip 2>/dev/null))
 }
 
 #
 # 4. Obtain the pods CIDR through calico-node yamls
 #
-get_pod_cidr() {
+# get_pod_cidr() {
    
-    # 检查kubectl命令是否存在,如果是普通节点上没有kubectl命令，无法获取，直接复用master节点上的识别结果
-    if ! command -v kubectl &> /dev/null; then
-        echo "kubectl command not found, skipping pod CIDR initialization"
-        return 0  # 命令不存在，不执行后续操作
-    fi
+#     # 检查kubectl命令是否存在,如果是普通节点上没有kubectl命令，无法获取，直接复用master节点上的识别结果
+#     if ! command -v kubectl &> /dev/null; then
+#         echo "kubectl command not found, skipping pod CIDR initialization"
+#         return 0  # 命令不存在，不执行后续操作
+#     fi
 
-   podCidr=`kubectl get ds calico-node -n kube-system --request-timeout=8s -o json 2>/dev/null | jq -r -c '.spec.template.spec.containers[].env[]|select(.name=="CALICO_IPV4POOL_CIDR")|.value' | head -1`
+#    podCidr=`kubectl get ds calico-node -n kube-system --request-timeout=8s -o json 2>/dev/null | jq -r -c '.spec.template.spec.containers[].env[]|select(.name=="CALICO_IPV4POOL_CIDR")|.value' | head -1`
 
-   # 判断变量是否为空（包括空字符串或null）
-if [ -z "$podCidr" ] || [ "$podCidr" = "null" ]; then
-    # 如果为空，则执行第二个命令获取值
-    podCidr=$(kubectl get ippool default-ipv4-ippool -o yaml 2>/dev/null | grep -i cidr | awk -F: '{print $2}' | tr -d '[:space:]')
-fi
-    echo "podCidr is "$podCidr >>tcpdump.log
-   perl -p -i -e "s#^podCidr=.*#podCidr=$podCidr#g" $0
+#    # 判断变量是否为空（包括空字符串或null）
+# if [ -z "$podCidr" ] || [ "$podCidr" = "null" ]; then
+#     # 如果为空，则执行第二个命令获取值
+#     podCidr=$(kubectl get ippool default-ipv4-ippool -o yaml 2>/dev/null | grep -i cidr | awk -F: '{print $2}' | tr -d '[:space:]')
+# fi
+#     echo "podCidr is "$podCidr >>tcpdump.log
+#    perl -p -i -e "s#^podCidr=.*#podCidr=$podCidr#g" $0
+# }
+
+
+dump_cluster_cidr_from_calico_ds() {
+
+   CLUSTER_CIDR_IPV4=($(kubectl get ds calico-node -n kube-system --request-timeout=8s -o json 2>/dev/null | jq -r -c '.spec.template.spec.containers[].env[]|select(.name=="CALICO_IPV4POOL_CIDR")|.value' | head -1))
+   CLUSTER_CIDR_IPV6=($(kubectl get ds calico-node -n kube-system --request-timeout=8s -o json 2>/dev/null | jq -r -c '.spec.template.spec.containers[].env[]|select(.name=="CALICO_IPV6POOL_CIDR")|.value' | head -1))
+   CLUSTER_CIDR=(${CLUSTER_CIDR_IPV4[@]} ${CLUSTER_CIDR_IPV6[@]})
+
+   # The alternative variable names, compatible with other situations
+   POD_CIDR_IPV4=(${CLUSTER_CIDR_IPV4[@]})
+   POD_CIDR_IPV6=(${CLUSTER_CIDR_IPV6[@]})
+   POD_CIDR=(${CLUSTER_CIDR[@]})
+
+   if [ ${#CLUSTER_CIDR_IPV4[@]} -ne 0 ]; then
+      echo "${CLUSTER_CIDR_IPV4[@]}" | tr ' ' '\n' | tee ${WORKING_DIRECTORY}/.cluster-cidr-ipv4
+   fi
+
+   if [ ${#CLUSTER_CIDR_IPV6[@]} -ne 0 ]; then
+      echo "${CLUSTER_CIDR_IPV6[@]}" | tr ' ' '\n' | tee ${WORKING_DIRECTORY}/.cluster-cidr-ipv6
+   fi
+
+   if [ ${#CLUSTER_CIDR[@]} -ne 0 ]; then
+      echo "${CLUSTER_CIDR[@]}" | tr ' ' '\n' | tee ${WORKING_DIRECTORY}/.cluster-cidr
+   fi
 }
 
+dump_cluster_cidr_from_ippool() {
 
+   CLUSTER_CIDR_IPV4=()
+   CLUSTER_CIDR_IPV6=()
+
+   for i in $(kubectl get ippool -o yaml 2>/dev/null | yq r - items[*].spec.cidr); do
+      local ipFamily=$(python3 ${WORKING_DIRECTORY}/network-utilities.py --get-ip-family $i)
+      if [ "$ipFamily" == "IPv4" ]; then
+         CLUSTER_CIDR_IPV4=(${CLUSTER_CIDR_IPV4[@]} "$i")
+      elif [ "$ipFamily" == "IPv6" ]; then
+         CLUSTER_CIDR_IPV6=(${CLUSTER_CIDR_IPV6[@]} "$i")
+      fi
+   done
+
+   CLUSTER_CIDR=(${CLUSTER_CIDR_IPV4[@]} ${CLUSTER_CIDR_IPV6[@]})
+
+   if [ ${#CLUSTER_CIDR_IPV4[@]} -ne 0 ]; then
+      echo "${CLUSTER_CIDR_IPV4[@]}" | tr ' ' '\n' | tee ${WORKING_DIRECTORY}/.cluster-cidr-ipv4
+   fi
+
+   if [ ${#CLUSTER_CIDR_IPV6[@]} -ne 0 ]; then
+      echo "${CLUSTER_CIDR_IPV6[@]}" | tr ' ' '\n' | tee ${WORKING_DIRECTORY}/.cluster-cidr-ipv6
+   fi
+
+   if [ ${#CLUSTER_CIDR[@]} -ne 0 ]; then
+      echo "${CLUSTER_CIDR[@]}" | tr ' ' '\n' | tee ${WORKING_DIRECTORY}/.cluster-cidr
+   fi
+}
+
+#
+# [Note] The --cluster-cidr parameter needs to be configured on kube-controller-manager component in most K8s environments, which is a fallback technique.
+#
+dump_cluster_cidr_from_controller_manager() {
+
+   CLUSTER_CIDR_IPV4=()
+   CLUSTER_CIDR_IPV6=()
+   CLUSTER_CIDR=($(ps -ef | grep kube-controller-manager | grep 'cluster-cidr' | sed 's#.*--cluster-cidr=\([^ ]*\).*#\1#g' | tr ',' '\n'))
+   
+   for i in $(CLUSTER_CIDR[@]); do
+      local ipFamily=$(python3 ${WORKING_DIRECTORY}/network-utilities.py --get-ip-family $i)
+      if [ "$ipFamily" == "IPv4" ]; then
+         CLUSTER_CIDR_IPV4=(${CLUSTER_CIDR_IPV4[@]} "$i")
+      elif [ "$ipFamily" == "IPv6" ]; then
+         CLUSTER_CIDR_IPV6=(${CLUSTER_CIDR_IPV6[@]} "$i")
+      fi
+   done
+
+   if [ ${#CLUSTER_CIDR_IPV4[@]} -ne 0 ]; then
+      echo "${CLUSTER_CIDR_IPV4[@]}" | tr ' ' '\n' | tee ${WORKING_DIRECTORY}/.cluster-cidr-ipv4
+   fi
+
+   if [ ${#CLUSTER_CIDR_IPV6[@]} -ne 0 ]; then
+      echo "${CLUSTER_CIDR_IPV6[@]}" | tr ' ' '\n' | tee ${WORKING_DIRECTORY}/.cluster-cidr-ipv6
+   fi
+
+   if [ ${#CLUSTER_CIDR[@]} -ne 0 ]; then
+      echo "${CLUSTER_CIDR[@]}" | tr ' ' '\n' | tee ${WORKING_DIRECTORY}/.cluster-cidr
+   fi
+}
+
+get_cluster_cidr() {
+
+   CLUSTER_CIDR_IPV4=($(cat ${WORKING_DIRECTORY}/.cluster-cidr-ipv4 2>/dev/null))
+   CLUSTER_CIDR_IPV6=($(cat ${WORKING_DIRECTORY}/.cluster-cidr-ipv6 2>/dev/null))
+   CLUSTER_CIDR=($(cat ${WORKING_DIRECTORY}/.cluster-cidr 2>/dev/null))
+
+   if ! ${PREFER_IPV6}; then
+
+      if [ ${#CLUSTER_CIDR_IPV4[@]} -eq 0 ]; then
+         dump_cluster_cidr_from_ippool
+      fi
+
+      if [ ${#CLUSTER_CIDR_IPV4[@]} -eq 0 ]; then
+         dump_cluster_cidr_from_controller_manager
+      fi
+
+      if [ ${#CLUSTER_CIDR_IPV4[@]} -eq 0 ]; then
+         dump_cluster_cidr_from_calico_ds
+      fi
+
+      if [ ${#CLUSTER_CIDR_IPV4[@]} -eq 0 ]; then
+         dump_cluster_cidr_from_kube_proxy
+      fi
+   
+   else
+
+      if [ ${#CLUSTER_CIDR_IPV6[@]} -eq 0 ]; then
+         dump_cluster_cidr_from_ippool
+      fi
+
+      if [ ${#CLUSTER_CIDR_IPV6[@]} -eq 0 ]; then
+         dump_cluster_cidr_from_controller_manager
+      fi
+
+      if [ ${#CLUSTER_CIDR_IPV6[@]} -eq 0 ]; then
+         dump_cluster_cidr_from_calico_ds
+      fi
+
+      if [ ${#CLUSTER_CIDR_IPV6[@]} -eq 0 ]; then
+         dump_cluster_cidr_from_kube_proxy
+      fi
+   
+   fi
+}
+
+#
+# [Note] The --cluser-cidr parameter is not mandatory for kube-proxy processes.
+#
+dump_cluster_cidr_from_kube_proxy() {
+
+   CLUSTER_CIDR_IPV4=()
+   CLUSTER_CIDR_IPV6=()
+   CLUSTER_CIDR=($(ps -ef | grep kube-proxy | grep 'cluster-cidr' | sed 's#.*--cluster-cidr=\([^ ]*\).*#\1#g' | tr ',' '\n'))
+   
+   for i in $(CLUSTER_CIDR[@]); do
+      local ipFamily=$(python3 ${WORKING_DIRECTORY}/network-utilities.py --get-ip-family $i)
+      if [ "$ipFamily" == "IPv4" ]; then
+         CLUSTER_CIDR_IPV4=(${CLUSTER_CIDR_IPV4[@]} "$i")
+      elif [ "$ipFamily" == "IPv6" ]; then
+         CLUSTER_CIDR_IPV6=(${CLUSTER_CIDR_IPV6[@]} "$i")
+      fi
+   done
+
+   if [ ${#CLUSTER_CIDR_IPV4[@]} -ne 0 ]; then
+      echo "${CLUSTER_CIDR_IPV4[@]}" | tr ' ' '\n' | tee ${WORKING_DIRECTORY}/.cluster-cidr-ipv4
+   fi
+
+   if [ ${#CLUSTER_CIDR_IPV6[@]} -ne 0 ]; then
+      echo "${CLUSTER_CIDR_IPV6[@]}" | tr ' ' '\n' | tee ${WORKING_DIRECTORY}/.cluster-cidr-ipv6
+   fi
+
+   if [ ${#CLUSTER_CIDR[@]} -ne 0 ]; then
+      echo "${CLUSTER_CIDR[@]}" | tr ' ' '\n' | tee ${WORKING_DIRECTORY}/.cluster-cidr
+   fi
+}
+
+dump_service_cidr_from_controller_manager() {
+
+   SERVICE_CIDR_IPV4=()
+   SERVICE_CIDR_IPV6=()
+   SERVICE_CIDR=($(ps -ef | grep kube-controller-manager | grep '\--service-cluster-ip-range' | sed 's#.*--service-cluster-ip-range=\([^ ]*\).*#\1#g' | tr ',' '\n'))
+   
+   for i in ${SERVICE_CIDR[@]}; do
+      local ipFamily=$(python3 ${WORKING_DIRECTORY}/network-utilities.py --get-ip-family $i)
+      if [ "$ipFamily" == "IPv4" ]; then
+         SERVICE_CIDR_IPV4=(${SERVICE_CIDR_IPV4[@]} "$i")
+      elif [ "$ipFamily" == "IPv6" ]; then
+         SERVICE_CIDR_IPV6=(${SERVICE_CIDR_IPV6[@]} "$i")
+      fi
+   done
+
+   echo '[Info] The K8s service CIDR in IPv4 family:'
+   if [ ${#SERVICE_CIDR_IPV4[@]} -ne 0 ]; then
+      echo "${SERVICE_CIDR_IPV4[@]}" | tr ' ' '\n' | tee ${WORKING_DIRECTORY}/.service-cidr-ipv4
+   fi
+
+   echo '[Info] The K8s service CIDR in IPv6 family:'
+   if [ ${#SERVICE_CIDR_IPV6[@]} -ne 0 ]; then
+      echo "${SERVICE_CIDR_IPV6[@]}" | tr ' ' '\n' | tee ${WORKING_DIRECTORY}/.service-cidr-ipv6
+   fi
+
+   echo '[Info] The K8s service CIDR in dual stack IP family:'
+   if [ ${#SERVICE_CIDR[@]} -ne 0 ]; then
+      echo "${SERVICE_CIDR[@]}" | tr ' ' '\n' | tee ${WORKING_DIRECTORY}/.service-cidr
+   fi
+}
+
+dump_service_cidr_from_kube_apiserver() {
+
+   SERVICE_CIDR_IPV4=()
+   SERVICE_CIDR_IPV6=()
+   SERVICE_CIDR=($(ps -ef | grep kube-apiserver | grep '\--service-cluster-ip-range' | sed 's#.*--service-cluster-ip-range=\([^ ]*\).*#\1#g' | tr ',' '\n'))
+   
+   for i in ${SERVICE_CIDR[@]}; do
+      local ipFamily=$(python3 ${WORKING_DIRECTORY}/network-utilities.py --get-ip-family $i)
+      if [ "$ipFamily" == "IPv4" ]; then
+         SERVICE_CIDR_IPV4=(${SERVICE_CIDR_IPV4[@]} "$i")
+      elif [ "$ipFamily" == "IPv6" ]; then
+         SERVICE_CIDR_IPV6=(${SERVICE_CIDR_IPV6[@]} "$i")
+      fi
+   done
+
+   echo '[Info] The K8s service CIDR in IPv4 family:'
+   if [ ${#SERVICE_CIDR_IPV4[@]} -ne 0 ]; then
+      echo "${SERVICE_CIDR_IPV4[@]}" | tr ' ' '\n' | tee ${WORKING_DIRECTORY}/.service-cidr-ipv4
+   fi
+
+   echo '[Info] The K8s service CIDR in IPv6 family:'
+   if [ ${#SERVICE_CIDR_IPV6[@]} -ne 0 ]; then
+      echo "${SERVICE_CIDR_IPV6[@]}" | tr ' ' '\n' | tee ${WORKING_DIRECTORY}/.service-cidr-ipv6
+   fi
+
+   echo '[Info] The K8s service CIDR in dual stack IP family:'
+   if [ ${#SERVICE_CIDR[@]} -ne 0 ]; then
+      echo "${SERVICE_CIDR[@]}" | tr ' ' '\n' | tee ${WORKING_DIRECTORY}/.service-cidr
+   fi
+}
+
+get_service_cidr() {
+
+   SERVICE_CIDR_IPV4=($(cat .service-cidr-ipv4 2>/dev/null))
+   SERVICE_CIDR_IPV6=($(cat .service-cidr-ipv6 2>/dev/null))
+   SERVICE_CIDR=($(cat .service-cidr 2>/dev/null))
+
+   if ! ${PREFER_IPV6}; then
+
+      if [ ${#SERVICE_CIDR_IPV4[@]} -eq 0 ]; then
+         dump_service_cidr_from_kube_apiserver
+      fi
+
+      if [ ${#SERVICE_CIDR_IPV4[@]} -eq 0 ]; then
+         dump_service_cidr_from_controller_manager
+      fi
+   
+   else
+
+      if [ ${#SERVICE_CIDR_IPV6[@]} -eq 0 ]; then
+         dump_service_cidr_from_kube_apiserver
+      fi
+
+      if [ ${#SERVICE_CIDR_IPV6[@]} -eq 0 ]; then
+         dump_service_cidr_from_controller_manager
+      fi
+
+   fi
+}
+
+#
+# [Note] Reload docker network subnets
+#
+get_docker_network_subnets() {
+
+   local i=
+
+   ${WORKING_DIRECTORY}/network-utilities.sh --save-docker-network-ip-addresses
+   IFS=$'\n' DOCKER_NETWORK_SUBNETS=($(cat ${WORKING_DIRECTORY}/.docker-networks 2>/dev/null))
+   DOCKER_NETWORK_SUBNETS_IPV4=()
+   DOCKER_NETWORK_SUBNETS_IPV6=()
+
+   for i in ${DOCKER_NETWORK_SUBNETS[@]}; do
+      local ipFamily=$(python3 ${WORKING_DIRECTORY}/network-utilities.py --get-ip-family $i)
+      echo "[Info] $i → $ipFamily."
+      if [ "$ipFamily" == "IPv4" ]; then
+         DOCKER_NETWORK_SUBNETS_IPV4=(${DOCKER_NETWORK_SUBNETS_IPV4[@]} $i)
+      elif [ "$ipFamily" == "IPv6" ]; then
+         DOCKER_NETWORK_SUBNETS_IPV6=(${DOCKER_NETWORK_SUBNETS_IPV6[@]} $i)
+      fi
+   done
+}
+
+#
+# [Note] The private subnets of current node contains: K8s cluster CIDR, K8s service CIDR, loopback interface CIDR, external IP addresses of current node, KVM network interface CIDR, docker network CIDRs, and all virtual network interface CIDRs
+#
+get_private_subnets() {
+
+   get_cluster_cidr
+   get_service_cidr
+   get_docker_network_subnets
+   get_external_ip_addresses
+
+   EXTERNAL_IP_ADDRESSES=($(echo ${EXTERNAL_IP_ADDRESSES[@]} | tr ' ' '\n' | sed 's#/.*$##g' | sed 's#$#/32#g'))
+
+   PRIVATE_SUBNETS_IPV4=($LOOPBACK_SUBNETS_IPV4 ${CLUSTER_CIDR_IPV4[@]} ${SERVICE_CIDR_IPV4[@]} ${DOCKER_NETWORK_SUBNETS_IPV4[@]} ${EXTERNAL_IP_ADDRESSES[@]} ${DOCKER_NETWORK_SUBNETS[@]})
+
+   PRIVATE_SUBNETS_IPV6=($LOOPBACK_SUBNETS_IPV6 ${CLUSTER_CIDR_IPV6[@]} ${SERVICE_CIDR_IPV6[@]} ${DOCKER_NETWORK_SUBNETS_IPV6[@]} )
+}
+
+#
+# [Note] Check if the subnet parameter is a private subnet
+#
+check_if_subnet_in_private() {
+   :
+}
+
+#
+# [Note] Check if the subnet parameter contains external IP of current node, and this situation will be considered as exposures.
+#
+check_if_subnet_in_exposure() {
+
+   SUBNET=$1
+   if [ -z "${SUBNET}" ]; then
+      echo '[Warn] Please provide subnet address.'
+      exit -1
+   fi
+
+   RESULT=false
+
+   # Fast check for wildcard subnet IP addresses
+   if [ "${SUBNET}" == "0.0.0.0/0" ]; then
+      RESULT=true
+      return
+   fi
+
+   for externalIP in ${EXTERNAL_IP_ADDRESSES[@]}; do
+
+      # Convert IP address format to subnet IP address format
+      if [[ ! "$externalIP" =~ "/" ]]; then
+         externalIP="$externalIP/32"
+      fi
+
+      RESULT=$(${WORKING_DIRECTORY}/network-utilities.sh --is-subnet-contained "$externalIP" "${SUBNET}")
+      if ${RESULT}; then
+         return
+      fi
+   done
+}
+
+#
+# [Note] Single process processing of iptables port forwarding policies
+#
+process_dnat_exposures() {
+
+   local beginLineNo=$1
+   local endLineNo=$2
+
+   if [ -z "$beginLineNo" ] || [ -z "$endLineNo" ]; then
+      echo '[Warn] This function need 2 parameters: the begin line number and the end line number of the file.'
+      exit -1
+   fi
+
+   IFS=$'\n'
+   for k in $(sed -n "$beginLineNo,$endLineNo"p ${WORKING_DIRECTORY}/iptables-dnat-exposures-raw.out); do
+      
+      SOURCE=$(echo "$k" | awk -F';' '{print $1}')
+      DESTINATION=$(echo "$k" | awk -F';' '{print $2}')
+      DPORTS=$(echo "$k" | awk -F';' '{print $3}')
+      TO=$(echo "$k" | awk -F';' '{print $4}')
+
+      check_if_subnet_in_exposure "${DESTINATION}"
+      if ! ${RESULT}; then
+         continue
+      fi
+
+      if [[ "${TO}" =~ "MARK" ]]; then
+         continue
+      fi
+
+      echo $k >> ${WORKING_DIRECTORY}/iptables-dnat-exposures-filtered.out
+   done
+}
+
+#
+# [Note] Parallel processing iptables port forwarding policies
+#
+concurrent_process_dnat_exposures() {
+
+   get_external_ip_addresses
+
+   get_cluster_cidr
+
+   # Filter the port forwarding strategy based on the dport keyword and save it as raw data to a file
+   iptables -t nat -S -w | grep '\--dport' | awk '{
+      source = "0.0.0.0/0"; destination = "0.0.0.0/0"; dports = "N/A"; to = "N/A"
+      for(i=1; i<=NF; i++) {
+         if ($i == "-s" || $i == "--src-range") { source = $(i+1) }
+         else if ($i == "-d") { destination = $(i+1) }
+         else if ($i == "--dport" || $i == "--dports") { dports = $(i+1) }
+         else if ($i == "--to-destination" || $i == "-j") { to = $(i+1) }
+      }
+      print source";"destination";"dports";"to
+   }' > ${WORKING_DIRECTORY}/iptables-dnat-exposures-raw.out
+
+   >${WORKING_DIRECTORY}/iptables-dnat-exposures-filtered.out
+
+   TOTAL_DNAT_POLICIES_COUNT=$(wc -l ${WORKING_DIRECTORY}/iptables-dnat-exposures-raw.out | awk '{print $1}')
+
+   echo "[Info] The current node contains ${TOTAL_DNAT_POLICIES_COUNT} port forwarding strategies."
+   echo '[Info] The data of raw port forwarding strategies in simple format has been saved in iptables-dnat-exposures-raw.out'
+
+   # Each JOB can analyze up to 100 records
+   MAX_JOBS=$(echo "scale=0; ${TOTAL_DNAT_POLICIES_COUNT} / 100" | bc)
+   JOB_COUNT=0
+
+   i=0
+   while [ $i -lt ${MAX_JOBS} ]; do
+
+      local beginLineNo=$(echo "$i * 100 + 1" | bc)
+      local endLineNo=$(echo "$i * 100 + 100" | bc)
+      (process_dnat_exposures "$beginLineNo" "$endLineNo") &
+      ((JOB_COUNT++))
+
+      # If the number of running jobs reaches the limit, then wait.
+      if [[ $JOB_COUNT -ge $MAX_JOBS ]]; then
+         wait           # Waiting for all current background tasks to end
+         JOB_COUNT=0    # Reset counter
+      fi
+
+      i=$(expr $i + 1)
+   done
+
+   wait                 # Waiting for the end of the last batch of backend tasks
+   echo '[Info] Processing complete.'
+}
+   # IP ranges got count < 256
+   # source not belong with
+   # destination not belong with
+   # NO MARK
+done
 
 # 考虑到有些 高版本的k8s集群，由之前的显示监听变为了“端口隐式监听，用ss/netstat查不到显式的LISTEN状态，但端口能接收流量,不创建 “用户# 态监听进程”，而是通过iptables规则直接将宿主机NodePort的流量转发到 Pod（属于 “隐式监听”）
 check_nodeport_netstat() {
@@ -1061,17 +1545,16 @@ dispatch_caps() {
    local logFileName=$noExt'.log'
 
    # Work Folder
-   local workDir=$(pwd)
 
-   ansible all -i "$nodesList" -m shell -a "mkdir -p $workDir" -f ${#nodes[@]}
+   ansible all -i "$nodesList" -m shell -a "mkdir -p ${WORKING_DIRECTORY}" -f ${#nodes[@]}
 
-   ansible all -i "$nodesList" -m copy -a "src=$0 dest=$workDir/" -f ${#nodes[@]}
+   ansible all -i "$nodesList" -m copy -a "src=$0 dest=${WORKING_DIRECTORY}/" -f ${#nodes[@]}
 
-   ansible all -i "$nodesList" -m copy -a "src=ipaddress-1.0.23-py2.py3-none-any.whl dest=$workDir/" -f ${#nodes[@]}
+   ansible all -i "$nodesList" -m copy -a "src=ipaddress-1.0.23-py2.py3-none-any.whl dest=${WORKING_DIRECTORY}/" -f ${#nodes[@]}
 
-   ansible all -i "$nodesList" -m copy -a "src=iprange.py dest=$workDir/" -f ${#nodes[@]}
+   ansible all -i "$nodesList" -m copy -a "src=iprange.py dest=${WORKING_DIRECTORY}/" -f ${#nodes[@]}
 
-   ansible all -i "$nodesList" -m shell -a "cd $workDir; chmod +x $selfName; nohup ./$selfName --run-host-caps 1>>$logFileName 2>>$logFileName &" -f ${#nodes[@]}
+   ansible all -i "$nodesList" -m shell -a "cd ${WORKING_DIRECTORY}; chmod +x $selfName; nohup ./$selfName --run-host-caps 1>>$logFileName 2>>$logFileName &" -f ${#nodes[@]}
 
    ansible all -i "$nodesList" -m shell -a "echo -n 'Capturing processes num: '; ps -ef | grep tcpdump | grep -vE 'grep|timeout' | wc -l" -f ${#nodes[@]} -o
 }
@@ -1104,16 +1587,13 @@ dispatch_gen_tasks() {
    # Obtain the file name of current shell
    local selfName=$(basename $0)
 
-   # Work Folder
-   local workDir=$(pwd)
+   ansible all -i "$nodesList" -m shell -a "mkdir -p ${WORKING_DIRECTORY}" -f ${#nodes[@]}
 
-   ansible all -i "$nodesList" -m shell -a "mkdir -p $workDir" -f ${#nodes[@]}
+   ansible all -i "$nodesList" -m copy -a "src=$0 dest=${WORKING_DIRECTORY}/" -f ${#nodes[@]}
 
-   ansible all -i "$nodesList" -m copy -a "src=$0 dest=$workDir/" -f ${#nodes[@]}
+   ansible all -i "$nodesList" -m shell -a "cd ${WORKING_DIRECTORY}; chmod +x $selfName; ./$selfName --gen-block-scripts" -f ${#nodes[@]}
 
-   ansible all -i "$nodesList" -m shell -a "cd $workDir; chmod +x $selfName; ./$selfName --gen-block-scripts" -f ${#nodes[@]}
-
-   ansible all -i "$nodesList" -m shell -a "cd $workDir; ls -ltr block.sh" -f ${#nodes[@]} -o
+   ansible all -i "$nodesList" -m shell -a "cd ${WORKING_DIRECTORY}; ls -ltr block.sh" -f ${#nodes[@]} -o
 }
 
 #
@@ -1133,14 +1613,11 @@ dispatch_blocks() {
    # Obtain the file name of current shell
    local selfName=$(basename $0)
 
-   # Work Folder
-   local workDir=$(pwd)
+   ansible all -i "$nodesList" -m shell -a "mkdir -p ${WORKING_DIRECTORY}" -f ${#nodes[@]}
 
-   ansible all -i "$nodesList" -m shell -a "mkdir -p $workDir" -f ${#nodes[@]}
+   ansible all -i "$nodesList" -m copy -a "src=$0 dest=${WORKING_DIRECTORY}/" -f ${#nodes[@]}
 
-   ansible all -i "$nodesList" -m copy -a "src=$0 dest=$workDir/" -f ${#nodes[@]}
-
-   ansible all -i "$nodesList" -m shell -a "cd $workDir; sh block.sh" -f ${#nodes[@]}
+   ansible all -i "$nodesList" -m shell -a "cd ${WORKING_DIRECTORY}; sh block.sh" -f ${#nodes[@]}
 }
 
 #
@@ -1159,14 +1636,11 @@ dispatch_rollbacks() {
    # Obtain the file name of current shell
    local selfName=$(basename $0)
 
-   # Work Folder
-   local workDir=$(pwd)
+   ansible all -i "$nodesList" -m shell -a "mkdir -p ${WORKING_DIRECTORY}" -f ${#nodes[@]}
 
-   ansible all -i "$nodesList" -m shell -a "mkdir -p $workDir" -f ${#nodes[@]}
+   ansible all -i "$nodesList" -m copy -a "src=$0 dest=${WORKING_DIRECTORY}/" -f ${#nodes[@]}
 
-   ansible all -i "$nodesList" -m copy -a "src=$0 dest=$workDir/" -f ${#nodes[@]}
-
-   ansible all -i "$nodesList" -m shell -a "cd $workDir; chmod +x $selfName; ./$selfName --disable-block" -f ${#nodes[@]}
+   ansible all -i "$nodesList" -m shell -a "cd ${WORKING_DIRECTORY}; chmod +x $selfName; ./$selfName --disable-block" -f ${#nodes[@]}
 }
 
 #########################################
