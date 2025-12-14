@@ -454,6 +454,11 @@ get_service_cidr() {
 #
 get_kvm_subnet_addresses() {
 
+   if [ -z "$(which virsh 2>/dev/null)" ]; then
+      echo '[Info] virsh does not exist.'
+      return
+   fi
+
    KVM_SUBNET_ADDRESSES=()
    KVM_SUBNET_ADDRESSES_IPV4=()
    KVM_SUBNET_ADDRESSES_IPV6=()
@@ -560,15 +565,23 @@ get_external_ip_addresses() {
    # Get all IP addresses of all physical or bonding interfaces. By filtering known virtual bridges, the purpose of this step is to supplement and improve the internal subnet addresses previously sorted out
    local i=
    local j=
+   local ipv4Addresses=()
+   local ipv6Addresses=()
+   local IFS=$'\n'
+
    for i in $(ip link show | awk -F': ' '/^[0-9]+: / {print $2}' | grep -vE '^lo$|^vmnet|^virbr|^br|^tun|^tap|^veth|^docker|^vnet|^cali|^flannel|^vxlan|^kube-ipvs|^dummy'); do
-      local ipv4Addresses=($(ip addr show dev "$i" | grep -w "inet" | sed 's#.*inet \([^/]*\)/[0-9]*.*#\1#g'))
-      local ipv6Addresses=($(ip addr show dev "$i" | grep -w "inet6" | grep -v 'fe80' | sed 's#.*inet6 \([^/]*\)/[0-9]*.*#\1#g'))
+
+      ipv4Addresses=($(ip addr show dev "$i" | grep -w "inet" | sed 's#.*inet \([^/]*\)/[0-9]*.*#\1#g'))
+      ipv6Addresses=($(ip addr show dev "$i" | grep -w "inet6" | grep -v 'fe80' | sed 's#.*inet6 \([^/]*\)/[0-9]*.*#\1#g'))
+
       for j in ${ipv4Addresses[@]}; do
+         # Check if belonging to internal subnet addresses
          local isPrivate=$(python3 network-utilities.py --check-ip-in-pools $j ${INTERNAL_SUBNET_ADDRESSES[@]} | tr '[:upper:]' '[:lower:]')
          if ! $isPrivate; then
             EXTERNAL_IPV4_ADDRESSES=( ${EXTERNAL_IPV4_ADDRESSES[@]} $j )
          fi
       done
+
       for j in ${ipv6Addresses[@]}; do
          local isPrivate=$(python3 network-utilities.py --check-ip-in-pools $j ${INTERNAL_SUBNET_ADDRESSES[@]} | tr '[:upper:]' '[:lower:]')
          if ! $isPrivate; then
@@ -577,7 +590,7 @@ get_external_ip_addresses() {
       done
    done
 
-   # Merge
+   # Merge IPv4 and IPv6 addresses
    EXTERNAL_IP_ADDRESSES=( ${EXTERNAL_IPV4_ADDRESSES[@]} ${EXTERNAL_IPV6_ADDRESSES[@]})
 
    echo '[Info] All external IP addresses of this host are as below:'
@@ -646,6 +659,7 @@ get_current_ip_environment() {
       echo "[Info] The primary IPv6 address of ${DEFAULT_NETWORK_INTERFACE} is ${CURRENT_IPV6:-<empty>}."
 
       IFS=$'\n' ADDITIONAL_IPV6=($(ip a show dev ${DEFAULT_NETWORK_INTERFACE} | grep -w 'inet6' | grep -w 'secondary' | grep -v 'fe80' | sed 's#.*inet6 \([^/]*\)/[0-9]*.*#\1#g'))
+      echo "[Info] The additional IPv6 addresses of ${DEFAULT_NETWORK_INTERFACE} is ${ADDITIONAL_IPV6[@]:-<empty>}."
 
       [ "${PREFER_IPV6}" = "false" ] && CURRENT_IP=${CURRENT_IPV4}
       [ "${PREFER_IPV6}" = "false" ] && ADDITIONAL_IP=( ${ADDITIONAL_IPV4[@]} )
@@ -714,14 +728,19 @@ get_external_interfaces() {
 
    > ${WORKING_DIRECTORY}/.external-interfaces
 
-   for iface in $(ip link show | awk -F': ' '/^[0-9]+: / {print $2}' | grep -vE '^lo$|^vmnet|^virbr|^br|^tun|^tap|^veth|^docker|^vnet|^cali|^flannel|^vxlan'); do
+   local ifName=
+   local ipv4Addresses=()
+   local ipv6Addresses=()
 
-      local ipv4Addr=$(ip -4 addr show dev "$iface" 2>/dev/null | grep inet | awk '{print $2}')
+   for ifName in $(ip link show | awk -F': ' '/^[0-9]+: / {print $2}' | grep -vE '^lo$|^vmnet|^virbr|^br|^tun|^tap|^veth|^docker|^vnet|^cali|^flannel|^vxlan|^kube-ipvs|^dummy'); do
+
+      IFS=$'\n' ipv4Addresses=($(ip -4 addr show dev "$ifName" 2>/dev/null | grep inet | awk '{print $2}'))
       # Check IPv6 address (global unicast address)
-      local ipv6Addr=$(ip -6 addr show dev "$iface" 2>/dev/null | grep inet6 | grep -v fe80:: | awk '{print $2}')
+      IFS=$'\n' ipv6Addresses=($(ip -6 addr show dev "$ifName" 2>/dev/null | grep inet6 | grep -v fe80:: | awk '{print $2}'))
     
-      if [ ! -z "$ipv4Addr" ] || [ ! -z "$ipv6Addr" ]; then
-         echo $iface >> ${WORKING_DIRECTORY}/.external-interfaces
+      # Network cards without IPv4/6 addresses are filtered out
+      if [ ${#ipv4Addresses[@]} -ne 0 ] || [ ${#ipv6Addresses[@]} -ne 0 ]; then
+         echo $ifName | tee -a ${WORKING_DIRECTORY}/.external-interfaces
       fi
    done
 }
@@ -732,16 +751,19 @@ get_external_interfaces() {
 #
 add_secondary_addresses() {
    
-   if [ ! -f .secondary-addresses ]; then
+   if [ ! -f ${WORKING_DIRECTORY}/.secondary-addresses ]; then
       echo '[Info] The configuration file .secondary-addresses does not exist.'
       exit -1
    fi
 
-   for i in $(jq -r -c .[] .secondary-addresses); do
-      local ifname=$(echo $i | jq -r -c 'keys[0]')
-      local ipaddrs=($(echo $i | jq -r -c .$ifname[]))
-      for j in ${ipaddrs[@]}; do
-         local k="ip addr add $j dev $ifname"
+   local i=
+   local j=
+
+   for i in $(jq -r -c .[] ${WORKING_DIRECTORY}/.secondary-addresses); do
+      local ifName=$(echo $i | jq -r -c 'keys[0]')
+      local ipAddresses=($(echo $i | jq -r -c .$ifName[]))
+      for j in ${ipAddresses[@]}; do
+         local k="ip addr add $j dev $ifName"
          eval "$k"
          echo "[Info] $k √"
       done
@@ -750,15 +772,18 @@ add_secondary_addresses() {
 
 del_secondary_addresses() {
 
-   if [ ! -f .secondary-addresses ]; then
+   if [ ! -f ${WORKING_DIRECTORY}/.secondary-addresses ]; then
       echo '[Info] The configuration file .secondary-addresses does not exist.'
       exit -1
    fi
 
-   for i in $(jq -r -c .[] .secondary-addresses); do
-      local ifname=$(echo $i | jq -r -c 'keys[0]')
-      local ipaddrs=($(echo $i | jq -r -c .$ifname[]))
-      for j in ${ipaddrs[@]}; do
+   local i=
+   local j=
+
+   for i in $(jq -r -c .[] ${WORKING_DIRECTORY}/.secondary-addresses); do
+      local ifName=$(echo $i | jq -r -c 'keys[0]')
+      local ipAddresses=($(echo $i | jq -r -c .$ifName[]))
+      for j in ${ifName[@]}; do
          local k="ip addr del $j dev $ifname"
          eval "$k"
          echo "[Info] $k √"
@@ -767,43 +792,82 @@ del_secondary_addresses() {
 }
 
 orderedPara=(
+   "--standardize-ip-address"
+   "--standardize-ip-addresses"
+   "--ip-to-int"
    "--is-subnet-contained"
-   "--save-external-ip-addresses"
-   "--save-additional-ip-addresses"
-   "--save-current-ip-environment"
-   "--save-external-interfaces"
-   "--save-docker-network-ip-addresses"
+   "--get-docker-subnet-addresses"
+   "--dump-cluster-cidr-from-calico-ds"
+   "--dump-cluster-cidr-from-ippool"
+   "--dump-cluster-cidr-from-controller-manager"
+   "--dump-cluster-cidr-from-kube-proxy"
+   "--get-cluster-cidr"
+   "--dump-service-cidr-from-controller-manager"
+   "--dump-service-cidr-from-kube-apiserver"
+   "--get-service-cidr"
+   "--get-kvm-subnet-addresses"
+   "--get-vmware-subnet-addresses"
+   "--get-external-ip-addresses"
+   "--get-additional-ip-addresses"
+   "--get-current-ip-environment"
+   "--get-external-interfaces"
    "--add-secondary-addresses"
    "--del-secondary-addresses"
    "--usage"
 )
 
 declare -A mapParaFunc=(
+   ["--standardize-ip-address"]="standardize_ip_address"
+   ["--standardize-ip-addresses"]="standardize_ip_addresses"
+   ["--ip-to-int"]="ip_to_int"
    ["--is-subnet-contained"]="is_subnet_contained"
-   ["--save-external-ip-addresses"]="save_external_ip_addresses"
-   ["--save-additional-ip-addresses"]="save_additional_ip_addresses"
-   ["--save-current-ip-environment"]="save_current_ip_environment"
-   ["--save-external-interfaces"]="save_external_interfaces"
-   ["--save-docker-network-ip-addresses"]="load_docker_network_ip_addresses"
+   ["--get-docker-subnet-addresses"]="get_docker_subnet_addresses"
+   ["--dump-cluster-cidr-from-calico-ds"]="dump_cluster_cidr_from_calico_ds"
+   ["--dump-cluster-cidr-from-ippool"]="dump_cluster_cidr_from_ippool"
+   ["--dump-cluster-cidr-from-controller-manager"]="dump_cluster_cidr_from_controller_manager"
+   ["--dump-cluster-cidr-from-kube-proxy"]="dump_cluster_cidr_from_kube_proxy"
+   ["--get-cluster-cidr"]="get_cluster_cidr"
+   ["--dump-service-cidr-from-controller-manager"]="dump_service_cidr_from_controller_manager"
+   ["--dump-service-cidr-from-kube-apiserver"]="dump_service_cidr_from_kube_apiserver"
+   ["--get-service-cidr"]="get_service_cidr"
+   ["--get-kvm-subnet-addresses"]="get_kvm_subnet_addresses"
+   ["--get-vmware-subnet-addresses"]="get_vmware_subnet_addresses"
+   ["--get-external-ip-addresses"]="get_external_ip_addresses"
+   ["--get-additional-ip-addresses"]="get_additional_ip_addresses"
+   ["--get-current-ip-environment"]="get_current_ip_environment"
+   ["--get-external-interfaces"]="get_external_interfaces"
    ["--add-secondary-addresses"]="add_secondary_addresses"
    ["--del-secondary-addresses"]="del_secondary_addresses"
    ["--usage"]="usage"
 )
 
 declare -A mapParaSpec=(
-   ["--is-subnet-contained"]="Use this option to check if one subnet belongs to another."
-   ["--save-external-ip-addresses"]="Use this option to save all external IP addresses to a specified hidden file: .external-ip."
-   ["--save-additional-ip-addresses"]="Use this option to save all additional IP addresses to a specified hidden file: .additional-ip."
-   ["--save-current-ip-environment"]="Use this option to save CURRENT_IP environment variable to .env file."
-   ["--save-external-interfaces"]="Use this option to save the business data network card (usually an external network adapter) to .external-interfaces file."
-   ["--save-docker-network-ip-addresses"]="Use this option to save docker network IP addresses to .docker-networks file."
+   ["--standardize-ip-address"]="Convert one single IPv4/6 address to strict subnet mode, for instance: 192.168.0.10/24 → 192.168.0.0/24."
+   ["--standardize-ip-addresses"]="Convert multiple IPv4/6 addresses to strict subnet mode"
+   ["--ip-to-int"]="Convert IPv4 to integer type. Usage: $0 --ip-to-int a.b.c.d"
+   ["--is-subnet-contained"]="Check if one subnet belongs to another. Usage: $0 --is-subnet-contained 192.168.0.10.25 192.168.0.2/24, will return true."
+   ["--get-docker-subnet-addresses"]="Save docker network IP addresses to .docker-networks file."
+   ["--dump-cluster-cidr-from-calico-ds"]="Get K8s cluster CIDRs / pods CIDRs from calico daemonset resource manifest, and save to hidden files."
+   ["--dump-cluster-cidr-from-ippool"]="Get K8s cluster CIDRs / pods CIDRs from ippool resource manifest, and save to hidden files."
+   ["--dump-cluster-cidr-from-controller-manager"]="Get K8s cluster CIDRs / pods CIDRs from kube-controller-manager parameters, and save to hidden files."
+   ["--dump-cluster-cidr-from-kube-proxy"]="Get K8s cluster CIDRs / pods CIDRs from kube-proxy parameters, and save to hidden files."
+   ["--get-cluster-cidr"]="Save K8s cluster CIDRs / pods CIDRs into hidden files, we will try the four methods mentioned above one by one and guide you to find the effective one."
+   ["--dump-service-cidr-from-controller-manager"]="Get K8s service CIDRs from kube-controller-manager parameters, and save to hidden files."
+   ["--dump-service-cidr-from-kube-apiserver"]="Get K8s service CIDRs from kube-apiserver parameters, and save to hidden files."
+   ["--get-service-cidr"]="Save K8s service CIDRs into hidden files, we will try the 2 methods mentioned above one by one and guide you to find the effective one."
+   ["--get-kvm-subnet-addresses"]="Save subnets of KVM virtual network interfaces into a hidden file."
+   ["--get-vmware-subnet-addresses"]="Save subnets of VMware Workstation virtual network interfaces into a hidden file."
+   ["--get-external-ip-addresses"]="Save all external IP addresses to a specified hidden file: .external-ip."
+   ["--get-additional-ip-addresses"]="Save all additional IP addresses to a specified hidden file: .additional-ip"
+   ["--get-current-ip-environment"]="Save CURRENT_IP environment variable to .env file."
+   ["--get-external-interfaces"]="Save the business data network card (usually an external network adapter) to .external-interfaces file."
    ["--add-secondary-addresses"]="Add secondary addresses based on the configuration data in the file .secondary-addresses."
    ["--del-secondary-addresses"]="Remove secondary addresses based on the configuration data in the file .secondary-addresses."
-   ["--usage"]="Operation Manual"
+   ["--usage"]="Operation Manual."
 )
 
 usage() {
-   echo '[Info] Network Utilities v1.0'
+   echo '[Info] Network Utilities v1.1'
    echo '[Info] Verified on BCLinux 8.2'
    echo '[Usage]'
 
