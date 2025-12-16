@@ -618,281 +618,6 @@ get_external_ip_addresses() {
 #    perl -p -i -e "s#^podCidr=.*#podCidr=$podCidr#g" $0
 # }
 
-
-dump_cluster_cidr_from_calico_ds() {
-
-   CLUSTER_CIDR_IPV4=($(kubectl get ds calico-node -n kube-system --request-timeout=8s -o json 2>/dev/null | jq -r -c '.spec.template.spec.containers[].env[]|select(.name=="CALICO_IPV4POOL_CIDR")|.value' | head -1))
-   CLUSTER_CIDR_IPV6=($(kubectl get ds calico-node -n kube-system --request-timeout=8s -o json 2>/dev/null | jq -r -c '.spec.template.spec.containers[].env[]|select(.name=="CALICO_IPV6POOL_CIDR")|.value' | head -1))
-   CLUSTER_CIDR=(${CLUSTER_CIDR_IPV4[@]} ${CLUSTER_CIDR_IPV6[@]})
-
-   # The alternative variable names, compatible with other situations
-   POD_CIDR_IPV4=(${CLUSTER_CIDR_IPV4[@]})
-   POD_CIDR_IPV6=(${CLUSTER_CIDR_IPV6[@]})
-   POD_CIDR=(${CLUSTER_CIDR[@]})
-
-   if [ ${#CLUSTER_CIDR_IPV4[@]} -ne 0 ]; then
-      echo "${CLUSTER_CIDR_IPV4[@]}" | tr ' ' '\n' | tee ${WORKING_DIRECTORY}/.cluster-cidr-ipv4
-   fi
-
-   if [ ${#CLUSTER_CIDR_IPV6[@]} -ne 0 ]; then
-      echo "${CLUSTER_CIDR_IPV6[@]}" | tr ' ' '\n' | tee ${WORKING_DIRECTORY}/.cluster-cidr-ipv6
-   fi
-
-   if [ ${#CLUSTER_CIDR[@]} -ne 0 ]; then
-      echo "${CLUSTER_CIDR[@]}" | tr ' ' '\n' | tee ${WORKING_DIRECTORY}/.cluster-cidr
-   fi
-}
-
-dump_cluster_cidr_from_ippool() {
-
-   CLUSTER_CIDR_IPV4=()
-   CLUSTER_CIDR_IPV6=()
-
-   for i in $(kubectl get ippool -o yaml 2>/dev/null | yq r - items[*].spec.cidr); do
-      local ipFamily=$(python3 ${WORKING_DIRECTORY}/network-utilities.py --get-ip-family $i)
-      if [ "$ipFamily" == "IPv4" ]; then
-         CLUSTER_CIDR_IPV4=(${CLUSTER_CIDR_IPV4[@]} "$i")
-      elif [ "$ipFamily" == "IPv6" ]; then
-         CLUSTER_CIDR_IPV6=(${CLUSTER_CIDR_IPV6[@]} "$i")
-      fi
-   done
-
-   CLUSTER_CIDR=(${CLUSTER_CIDR_IPV4[@]} ${CLUSTER_CIDR_IPV6[@]})
-
-   if [ ${#CLUSTER_CIDR_IPV4[@]} -ne 0 ]; then
-      echo "${CLUSTER_CIDR_IPV4[@]}" | tr ' ' '\n' | tee ${WORKING_DIRECTORY}/.cluster-cidr-ipv4
-   fi
-
-   if [ ${#CLUSTER_CIDR_IPV6[@]} -ne 0 ]; then
-      echo "${CLUSTER_CIDR_IPV6[@]}" | tr ' ' '\n' | tee ${WORKING_DIRECTORY}/.cluster-cidr-ipv6
-   fi
-
-   if [ ${#CLUSTER_CIDR[@]} -ne 0 ]; then
-      echo "${CLUSTER_CIDR[@]}" | tr ' ' '\n' | tee ${WORKING_DIRECTORY}/.cluster-cidr
-   fi
-}
-
-#
-# [Note] The --cluster-cidr parameter needs to be configured on kube-controller-manager component in most K8s environments, which is a fallback technique.
-#
-dump_cluster_cidr_from_controller_manager() {
-
-   CLUSTER_CIDR_IPV4=()
-   CLUSTER_CIDR_IPV6=()
-   CLUSTER_CIDR=($(ps -ef | grep kube-controller-manager | grep 'cluster-cidr' | sed 's#.*--cluster-cidr=\([^ ]*\).*#\1#g' | tr ',' '\n'))
-   
-   for i in $(CLUSTER_CIDR[@]); do
-      local ipFamily=$(python3 ${WORKING_DIRECTORY}/network-utilities.py --get-ip-family $i)
-      if [ "$ipFamily" == "IPv4" ]; then
-         CLUSTER_CIDR_IPV4=(${CLUSTER_CIDR_IPV4[@]} "$i")
-      elif [ "$ipFamily" == "IPv6" ]; then
-         CLUSTER_CIDR_IPV6=(${CLUSTER_CIDR_IPV6[@]} "$i")
-      fi
-   done
-
-   if [ ${#CLUSTER_CIDR_IPV4[@]} -ne 0 ]; then
-      echo "${CLUSTER_CIDR_IPV4[@]}" | tr ' ' '\n' | tee ${WORKING_DIRECTORY}/.cluster-cidr-ipv4
-   fi
-
-   if [ ${#CLUSTER_CIDR_IPV6[@]} -ne 0 ]; then
-      echo "${CLUSTER_CIDR_IPV6[@]}" | tr ' ' '\n' | tee ${WORKING_DIRECTORY}/.cluster-cidr-ipv6
-   fi
-
-   if [ ${#CLUSTER_CIDR[@]} -ne 0 ]; then
-      echo "${CLUSTER_CIDR[@]}" | tr ' ' '\n' | tee ${WORKING_DIRECTORY}/.cluster-cidr
-   fi
-}
-
-get_cluster_cidr() {
-
-   CLUSTER_CIDR_IPV4=($(cat ${WORKING_DIRECTORY}/.cluster-cidr-ipv4 2>/dev/null))
-   CLUSTER_CIDR_IPV6=($(cat ${WORKING_DIRECTORY}/.cluster-cidr-ipv6 2>/dev/null))
-   CLUSTER_CIDR=($(cat ${WORKING_DIRECTORY}/.cluster-cidr 2>/dev/null))
-
-   if ! ${PREFER_IPV6}; then
-
-      if [ ${#CLUSTER_CIDR_IPV4[@]} -eq 0 ]; then
-         dump_cluster_cidr_from_ippool
-      fi
-
-      if [ ${#CLUSTER_CIDR_IPV4[@]} -eq 0 ]; then
-         dump_cluster_cidr_from_controller_manager
-      fi
-
-      if [ ${#CLUSTER_CIDR_IPV4[@]} -eq 0 ]; then
-         dump_cluster_cidr_from_calico_ds
-      fi
-
-      if [ ${#CLUSTER_CIDR_IPV4[@]} -eq 0 ]; then
-         dump_cluster_cidr_from_kube_proxy
-      fi
-   
-   else
-
-      if [ ${#CLUSTER_CIDR_IPV6[@]} -eq 0 ]; then
-         dump_cluster_cidr_from_ippool
-      fi
-
-      if [ ${#CLUSTER_CIDR_IPV6[@]} -eq 0 ]; then
-         dump_cluster_cidr_from_controller_manager
-      fi
-
-      if [ ${#CLUSTER_CIDR_IPV6[@]} -eq 0 ]; then
-         dump_cluster_cidr_from_calico_ds
-      fi
-
-      if [ ${#CLUSTER_CIDR_IPV6[@]} -eq 0 ]; then
-         dump_cluster_cidr_from_kube_proxy
-      fi
-   
-   fi
-}
-
-#
-# [Note] The --cluser-cidr parameter is not mandatory for kube-proxy processes.
-#
-dump_cluster_cidr_from_kube_proxy() {
-
-   CLUSTER_CIDR_IPV4=()
-   CLUSTER_CIDR_IPV6=()
-   CLUSTER_CIDR=($(ps -ef | grep kube-proxy | grep 'cluster-cidr' | sed 's#.*--cluster-cidr=\([^ ]*\).*#\1#g' | tr ',' '\n'))
-   
-   for i in $(CLUSTER_CIDR[@]); do
-      local ipFamily=$(python3 ${WORKING_DIRECTORY}/network-utilities.py --get-ip-family $i)
-      if [ "$ipFamily" == "IPv4" ]; then
-         CLUSTER_CIDR_IPV4=(${CLUSTER_CIDR_IPV4[@]} "$i")
-      elif [ "$ipFamily" == "IPv6" ]; then
-         CLUSTER_CIDR_IPV6=(${CLUSTER_CIDR_IPV6[@]} "$i")
-      fi
-   done
-
-   if [ ${#CLUSTER_CIDR_IPV4[@]} -ne 0 ]; then
-      echo "${CLUSTER_CIDR_IPV4[@]}" | tr ' ' '\n' | tee ${WORKING_DIRECTORY}/.cluster-cidr-ipv4
-   fi
-
-   if [ ${#CLUSTER_CIDR_IPV6[@]} -ne 0 ]; then
-      echo "${CLUSTER_CIDR_IPV6[@]}" | tr ' ' '\n' | tee ${WORKING_DIRECTORY}/.cluster-cidr-ipv6
-   fi
-
-   if [ ${#CLUSTER_CIDR[@]} -ne 0 ]; then
-      echo "${CLUSTER_CIDR[@]}" | tr ' ' '\n' | tee ${WORKING_DIRECTORY}/.cluster-cidr
-   fi
-}
-
-dump_service_cidr_from_controller_manager() {
-
-   SERVICE_CIDR_IPV4=()
-   SERVICE_CIDR_IPV6=()
-   SERVICE_CIDR=($(ps -ef | grep kube-controller-manager | grep '\--service-cluster-ip-range' | sed 's#.*--service-cluster-ip-range=\([^ ]*\).*#\1#g' | tr ',' '\n'))
-   
-   for i in ${SERVICE_CIDR[@]}; do
-      local ipFamily=$(python3 ${WORKING_DIRECTORY}/network-utilities.py --get-ip-family $i)
-      if [ "$ipFamily" == "IPv4" ]; then
-         SERVICE_CIDR_IPV4=(${SERVICE_CIDR_IPV4[@]} "$i")
-      elif [ "$ipFamily" == "IPv6" ]; then
-         SERVICE_CIDR_IPV6=(${SERVICE_CIDR_IPV6[@]} "$i")
-      fi
-   done
-
-   echo '[Info] The K8s service CIDR in IPv4 family:'
-   if [ ${#SERVICE_CIDR_IPV4[@]} -ne 0 ]; then
-      echo "${SERVICE_CIDR_IPV4[@]}" | tr ' ' '\n' | tee ${WORKING_DIRECTORY}/.service-cidr-ipv4
-   fi
-
-   echo '[Info] The K8s service CIDR in IPv6 family:'
-   if [ ${#SERVICE_CIDR_IPV6[@]} -ne 0 ]; then
-      echo "${SERVICE_CIDR_IPV6[@]}" | tr ' ' '\n' | tee ${WORKING_DIRECTORY}/.service-cidr-ipv6
-   fi
-
-   echo '[Info] The K8s service CIDR in dual stack IP family:'
-   if [ ${#SERVICE_CIDR[@]} -ne 0 ]; then
-      echo "${SERVICE_CIDR[@]}" | tr ' ' '\n' | tee ${WORKING_DIRECTORY}/.service-cidr
-   fi
-}
-
-dump_service_cidr_from_kube_apiserver() {
-
-   SERVICE_CIDR_IPV4=()
-   SERVICE_CIDR_IPV6=()
-   SERVICE_CIDR=($(ps -ef | grep kube-apiserver | grep '\--service-cluster-ip-range' | sed 's#.*--service-cluster-ip-range=\([^ ]*\).*#\1#g' | tr ',' '\n'))
-   
-   for i in ${SERVICE_CIDR[@]}; do
-      local ipFamily=$(python3 ${WORKING_DIRECTORY}/network-utilities.py --get-ip-family $i)
-      if [ "$ipFamily" == "IPv4" ]; then
-         SERVICE_CIDR_IPV4=(${SERVICE_CIDR_IPV4[@]} "$i")
-      elif [ "$ipFamily" == "IPv6" ]; then
-         SERVICE_CIDR_IPV6=(${SERVICE_CIDR_IPV6[@]} "$i")
-      fi
-   done
-
-   echo '[Info] The K8s service CIDR in IPv4 family:'
-   if [ ${#SERVICE_CIDR_IPV4[@]} -ne 0 ]; then
-      echo "${SERVICE_CIDR_IPV4[@]}" | tr ' ' '\n' | tee ${WORKING_DIRECTORY}/.service-cidr-ipv4
-   fi
-
-   echo '[Info] The K8s service CIDR in IPv6 family:'
-   if [ ${#SERVICE_CIDR_IPV6[@]} -ne 0 ]; then
-      echo "${SERVICE_CIDR_IPV6[@]}" | tr ' ' '\n' | tee ${WORKING_DIRECTORY}/.service-cidr-ipv6
-   fi
-
-   echo '[Info] The K8s service CIDR in dual stack IP family:'
-   if [ ${#SERVICE_CIDR[@]} -ne 0 ]; then
-      echo "${SERVICE_CIDR[@]}" | tr ' ' '\n' | tee ${WORKING_DIRECTORY}/.service-cidr
-   fi
-}
-
-get_service_cidr() {
-
-   SERVICE_CIDR_IPV4=($(cat .service-cidr-ipv4 2>/dev/null))
-   SERVICE_CIDR_IPV6=($(cat .service-cidr-ipv6 2>/dev/null))
-   SERVICE_CIDR=($(cat .service-cidr 2>/dev/null))
-
-   if ! ${PREFER_IPV6}; then
-
-      if [ ${#SERVICE_CIDR_IPV4[@]} -eq 0 ]; then
-         dump_service_cidr_from_kube_apiserver
-      fi
-
-      if [ ${#SERVICE_CIDR_IPV4[@]} -eq 0 ]; then
-         dump_service_cidr_from_controller_manager
-      fi
-   
-   else
-
-      if [ ${#SERVICE_CIDR_IPV6[@]} -eq 0 ]; then
-         dump_service_cidr_from_kube_apiserver
-      fi
-
-      if [ ${#SERVICE_CIDR_IPV6[@]} -eq 0 ]; then
-         dump_service_cidr_from_controller_manager
-      fi
-
-   fi
-}
-
-#
-# [Note] Reload docker network subnets
-#
-get_docker_network_subnets() {
-
-   local i=
-
-   ${WORKING_DIRECTORY}/network-utilities.sh --save-docker-network-ip-addresses
-   IFS=$'\n' DOCKER_NETWORK_SUBNETS=($(cat ${WORKING_DIRECTORY}/.docker-networks 2>/dev/null))
-   DOCKER_NETWORK_SUBNETS_IPV4=()
-   DOCKER_NETWORK_SUBNETS_IPV6=()
-
-   for i in ${DOCKER_NETWORK_SUBNETS[@]}; do
-      local ipFamily=$(python3 ${WORKING_DIRECTORY}/network-utilities.py --get-ip-family $i)
-      echo "[Info] $i → $ipFamily."
-      if [ "$ipFamily" == "IPv4" ]; then
-         DOCKER_NETWORK_SUBNETS_IPV4=(${DOCKER_NETWORK_SUBNETS_IPV4[@]} $i)
-      elif [ "$ipFamily" == "IPv6" ]; then
-         DOCKER_NETWORK_SUBNETS_IPV6=(${DOCKER_NETWORK_SUBNETS_IPV6[@]} $i)
-      fi
-   done
-}
-
 #
 # [Note] The private subnets of current node contains: K8s cluster CIDR, K8s service CIDR, loopback interface CIDR, external IP addresses of current node, KVM network interface CIDR, docker network CIDRs, and all virtual network interface CIDRs
 #
@@ -918,129 +643,425 @@ check_if_subnet_in_private() {
 }
 
 #
-# [Note] Check if the subnet parameter contains external IP of current node, and this situation will be considered as exposures.
+# [Note] Check if the subnet parameter contains external IP of current node, and this situation will be considered as exposures. Prerequisites: the EXTERNAL_IPV*_ADDRESSES variables must be loaded 
 #
 check_if_subnet_in_exposure() {
 
-   SUBNET=$1
-   if [ -z "${SUBNET}" ]; then
+   local subnet=$1
+   local ipFamily=
+   local externalIP=
+   local result=
+
+   if [ -z "$subnet" ]; then
       echo '[Warn] Please provide subnet address.'
       exit -1
    fi
 
-   RESULT=false
-
-   # Fast check for wildcard subnet IP addresses
-   if [ "${SUBNET}" == "0.0.0.0/0" ]; then
-      RESULT=true
+   # Shortcut check for wildcard subnet IP addresses, belonging to the exposure scope
+   # Matching rules: 0.0.0.0 is equivalent to 0.0.0.0/0, [::] is equivalent to ::/0, * is equivalent to both 0.0.0.0/0 and ::/0
+   if [[ "$subnet" =~ "0.0.0.0" ]] || [ "$subnet" == "::/0" ] || [ "$subnet" == "[::]" ] || [ "$subnet" == "*" ]; then
+      echo 'true'
       return
    fi
 
-   for externalIP in ${EXTERNAL_IP_ADDRESSES[@]}; do
+   # Shortcut check for loopback subnet IP addresses, not belonging to the exposure scope
+   # Matching rules: 127.0.0.1 is equivalent to 127.0.0.1/32, [::1] is equivalent to ::1/128
+   if [[ "$subnet" =~ "127.0.0.1" ]] || [ "$subnet" == "[::1]" ]; then
+      echo 'false'
+      return
+   fi
 
-      # Convert IP address format to subnet IP address format
-      if [[ ! "$externalIP" =~ "/" ]]; then
-         externalIP="$externalIP/32"
-      fi
+   ipFamily=$(python3 ${WORKING_DIRECTORY}/network-utilities.py --get-ip-family "$subnet")
 
-      RESULT=$(${WORKING_DIRECTORY}/network-utilities.sh --is-subnet-contained "$externalIP" "${SUBNET}")
-      if ${RESULT}; then
-         return
-      fi
-   done
+   if [ "$ipFamily" == "IPv4" ]; then
+
+      for externalIP in ${EXTERNAL_IPV4_ADDRESSES[@]}; do
+
+         # Convert IP address format to subnet IP address format
+         if [[ ! "$externalIP" =~ "/" ]]; then
+            externalIP="$externalIP/32"
+         fi
+
+         result=$(python3 ${WORKING_DIRECTORY}/network-utilities.py --is-subnet "$externalIP" "$subnet" | tr '[:upper:]' '[:lower:]')
+
+         if $result; then
+            echo 'true'
+            return
+         fi
+      done
+
+   elif [ "$ipFamily" == "IPv6" ]; then
+
+      for externalIP in ${EXTERNAL_IPV6_ADDRESSES[@]}; do
+
+         # Convert IP address format to subnet IP address format
+         if [[ ! "$externalIP" =~ "/" ]]; then
+            externalIP="$externalIP/128"
+         fi
+
+         result=$(python3 ${WORKING_DIRECTORY}/network-utilities.py --is-subnet "$externalIP" "$subnet" | tr '[:upper:]' '[:lower:]')
+
+         if $result; then
+            echo 'true'
+            return
+         fi
+      done
+   fi
+
+   echo 'false'
 }
 
 #
-# [Note] Single process processing of iptables port forwarding policies
+# [Note] Single process processing of iptables port forwarding policies dump file specified by parameter 1. The starting and ending lines of the next two parameters indicate the scope of the processed file content.
 #
 process_dnat_exposures() {
 
-   local beginLineNo=$1
-   local endLineNo=$2
+   local filePath=$1
+   local beginLineNo=$2
+   local endLineNo=$3
+   local IFS=$'\n'
+   local temporaryFilePath="$filePath.tmp"
+   local k=
 
-   if [ -z "$beginLineNo" ] || [ -z "$endLineNo" ]; then
-      echo '[Warn] This function need 2 parameters: the begin line number and the end line number of the file.'
+   if [ -z "$filePath" ] || [ -z "$beginLineNo" ] || [ -z "$endLineNo" ]; then
+      echo '[Warn] This function need 3 parameters: the iptables strategies file path, the begin line number and the end line number of this file.'
       exit -1
    fi
 
-   IFS=$'\n'
-   for k in $(sed -n "$beginLineNo,$endLineNo"p ${WORKING_DIRECTORY}/iptables-dnat-exposures-raw.out); do
+   for k in $(sed -n "$beginLineNo,$endLineNo"p $filePath); do
       
-      SOURCE=$(echo "$k" | awk -F';' '{print $1}')
-      DESTINATION=$(echo "$k" | awk -F';' '{print $2}')
-      DPORTS=$(echo "$k" | awk -F';' '{print $3}')
-      TO=$(echo "$k" | awk -F';' '{print $4}')
+      local destination=$(echo "$k" | awk -F';' '{print $2}')
+      local to=$(echo "$k" | awk -F';' '{print $4}')
 
-      check_if_subnet_in_exposure "${DESTINATION}"
-      if ! ${RESULT}; then
+      # The policies jump to *MARK* links will be ignored
+      if [[ "$to" =~ "MARK" ]]; then
          continue
       fi
 
-      if [[ "${TO}" =~ "MARK" ]]; then
+      local result=$(check_if_subnet_in_exposure "$destination")
+      if ! $result; then
          continue
       fi
 
-      echo $k >> ${WORKING_DIRECTORY}/iptables-dnat-exposures-filtered.out
+      echo $k >> $temporaryFilePath
    done
 }
 
+load_external_ip_addresses_from_file() {
+
+   if [ ! -f ${WORKING_DIRECTORY}/.external-ip ]; then
+      ${WORKING_DIRECTORY}/network-utilities.sh --get-external-ip-addresses
+   fi
+
+   EXTERNAL_IP_ADDRESSES=($(cat ${WORKING_DIRECTORY}/.external-ip 2>/dev/null))
+   EXTERNAL_IPV4_ADDRESSES=($(cat ${WORKING_DIRECTORY}/.external-ipv4 2>/dev/null))
+   EXTERNAL_IPV6_ADDRESSES=($(cat ${WORKING_DIRECTORY}/.external-ipv6 2>/dev/null))
+}
+
+load_docker_subnet_addresses_from_file() {
+
+   if [ ! -f ${WORKING_DIRECTORY}/.docker-networks ]; then
+      ${WORKING_DIRECTORY}/network-utilities.sh --get-docker-subnet-addresses
+   fi
+
+   DOCKER_NETWORK_SUBNETS=($(cat ${WORKING_DIRECTORY}/.docker-networks 2>/dev/null))
+   DOCKER_NETWORK_SUBNETS_IPV4=($(cat ${WORKING_DIRECTORY}/.docker-networks-ipv4 2>/dev/null))
+   DOCKER_NETWORK_SUBNETS_IPV6=($(cat ${WORKING_DIRECTORY}/.docker-networks-ipv6 2>/dev/null))
+}
+
 #
-# [Note] Parallel processing iptables port forwarding policies
+# [Note] This method is used for dump iptables strategies, such as tcp4, udp4, tcp6 and udp6.
 #
-concurrent_process_dnat_exposures() {
+dump_dnat_strategy_tables() {
 
-   get_external_ip_addresses
+   load_external_ip_addresses_from_file
 
-   get_cluster_cidr
+   # [1] Generate TCP4/UDP4 DNAT exposures file
+   if [ ${#EXTERNAL_IPV4_ADDRESSES[@]} -ne 0 ]; then
+      # Filter the port forwarding strategy based on the --dport[s] keyword and save it as raw data to a file
+      # We extracted several key attributes from the DNAT policies: The source client, the destination server, the destination ports and forwarded to anywhere
+      iptables -t nat -S -w | grep '\--dport' | grep '\-p tcp' | awk '{
+         source = "0.0.0.0/0"; destination = "0.0.0.0/0"; dports = "N/A"; to = "N/A"
+         for(i=1; i<=NF; i++) {
+            if ($i == "-s" || $i == "--src-range") { source = $(i+1) }
+            else if ($i == "-d") { destination = $(i+1) }
+            else if ($i == "--dport" || $i == "--dports") { dports = $(i+1) }
+            else if ($i == "--to-destination" || $i == "-j") { to = $(i+1) }
+         }
+         print source";"destination";"dports";"to
+      }' > ${WORKING_DIRECTORY}/.tcp4-dnat-exposures
 
-   # Filter the port forwarding strategy based on the dport keyword and save it as raw data to a file
-   iptables -t nat -S -w | grep '\--dport' | awk '{
-      source = "0.0.0.0/0"; destination = "0.0.0.0/0"; dports = "N/A"; to = "N/A"
-      for(i=1; i<=NF; i++) {
-         if ($i == "-s" || $i == "--src-range") { source = $(i+1) }
-         else if ($i == "-d") { destination = $(i+1) }
-         else if ($i == "--dport" || $i == "--dports") { dports = $(i+1) }
-         else if ($i == "--to-destination" || $i == "-j") { to = $(i+1) }
-      }
-      print source";"destination";"dports";"to
-   }' > ${WORKING_DIRECTORY}/iptables-dnat-exposures-raw.out
+      echo "[Info] $(wc -l ${WORKING_DIRECTORY}/.tcp4-dnat-exposures | awk '{print $1}') records have been saved in ${WORKING_DIRECTORY}/.tcp4-dnat-exposures."
 
-   >${WORKING_DIRECTORY}/iptables-dnat-exposures-filtered.out
+      iptables -t nat -S -w | grep '\--dport' | grep '\-p udp' | awk '{
+         source = "0.0.0.0/0"; destination = "0.0.0.0/0"; dports = "N/A"; to = "N/A"
+         for(i=1; i<=NF; i++) {
+            if ($i == "-s" || $i == "--src-range") { source = $(i+1) }
+            else if ($i == "-d") { destination = $(i+1) }
+            else if ($i == "--dport" || $i == "--dports") { dports = $(i+1) }
+            else if ($i == "--to-destination" || $i == "-j") { to = $(i+1) }
+         }
+         print source";"destination";"dports";"to
+      }' > ${WORKING_DIRECTORY}/.udp4-dnat-exposures
 
-   TOTAL_DNAT_POLICIES_COUNT=$(wc -l ${WORKING_DIRECTORY}/iptables-dnat-exposures-raw.out | awk '{print $1}')
+      echo "[Info] $(wc -l ${WORKING_DIRECTORY}/.udp4-dnat-exposures | awk '{print $1}') records have been saved in ${WORKING_DIRECTORY}/.udp4-dnat-exposures."
+   fi
 
-   echo "[Info] The current node contains ${TOTAL_DNAT_POLICIES_COUNT} port forwarding strategies."
-   echo '[Info] The data of raw port forwarding strategies in simple format has been saved in iptables-dnat-exposures-raw.out'
+   # [2] Generate TCP6/UDP6 DNAT exposures file
+   if [ ${#EXTERNAL_IPV6_ADDRESSES[@]} -ne 0 ]; then
 
-   # Each JOB can analyze up to 100 records
-   MAX_JOBS=$(echo "scale=0; ${TOTAL_DNAT_POLICIES_COUNT} / 100" | bc)
-   JOB_COUNT=0
+      ip6tables -t nat -S -w | grep '\--dport' | grep '\-p tcp' | awk '{
+         source = "::/0"; destination = "::/0"; dports = "N/A"; to = "N/A"
+         for(i=1; i<=NF; i++) {
+            if ($i == "-s" || $i == "--src-range") { source = $(i+1) }
+            else if ($i == "-d") { destination = $(i+1) }
+            else if ($i == "--dport" || $i == "--dports") { dports = $(i+1) }
+            else if ($i == "--to-destination" || $i == "-j") { to = $(i+1) }
+         }
+         print source";"destination";"dports";"to
+      }' > ${WORKING_DIRECTORY}/tcp6-dnat-exposures.out
 
-   i=0
-   while [ $i -lt ${MAX_JOBS} ]; do
+      echo "[Info] $(wc -l ${WORKING_DIRECTORY}/.tcp6-dnat-exposures | awk '{print $1}') records have been saved in ${WORKING_DIRECTORY}/.tcp6-dnat-exposures."
 
-      local beginLineNo=$(echo "$i * 100 + 1" | bc)
-      local endLineNo=$(echo "$i * 100 + 100" | bc)
-      (process_dnat_exposures "$beginLineNo" "$endLineNo") &
-      ((JOB_COUNT++))
+      ip6tables -t nat -S -w | grep '\--dport' | grep '\-p udp' | awk '{
+         source = "::/0"; destination = "::/0"; dports = "N/A"; to = "N/A"
+         for(i=1; i<=NF; i++) {
+            if ($i == "-s" || $i == "--src-range") { source = $(i+1) }
+            else if ($i == "-d") { destination = $(i+1) }
+            else if ($i == "--dport" || $i == "--dports") { dports = $(i+1) }
+            else if ($i == "--to-destination" || $i == "-j") { to = $(i+1) }
+         }
+         print source";"destination";"dports";"to
+      }' > ${WORKING_DIRECTORY}/udp6-dnat-exposures.out
+
+      echo "[Info] $(wc -l ${WORKING_DIRECTORY}/.udp6-dnat-exposures | awk '{print $1}') records have been saved in ${WORKING_DIRECTORY}/.udp6-dnat-exposures."
+   fi
+}
+
+#
+# [Note] The abstract function of parallel processing includes three parameters: the name of the processing function, the file to be processed, and the number of records processed by a single process
+#
+abstract_concurrent_process() {
+
+   local processorName=$1
+   local filePath=$2
+   local singleProcessRecordsNumber=$3
+   local totalRecordsNumber=
+   local temporaryFilePath="$filePath.tmp"
+
+   if [ -z "$processorName" ] || [ -z "$filePath" ] || [ ! -f "$filePath" ]; then
+      echo '[Warn] You should provide the name of the processing function and the full path of the file to be processed.'
+      exit -1
+   fi
+
+   # The default number of records processed by a single process
+   if [ -z "$singleProcessRecordsNumber" ]; then
+      singleProcessRecordsNumber=50
+   fi
+
+   totalRecordsNumber=$(wc -l $filePath | awk '{print $1}')
+
+   >$temporaryFilePath
+
+   local maxJobs=$(echo "scale=0; $totalRecordsNumber / $singleProcessRecordsNumber" | bc)
+   local jobCount=0
+
+   local i=0
+   while [ $i -le $maxJobs ]; do
+
+      local beginLineNo=$(echo "$i * $singleProcessRecordsNumber + 1" | bc)
+      local endLineNo=$(echo "$i * $singleProcessRecordsNumber + $singleProcessRecordsNumber" | bc)
+      ($processorName "$filePath" "$beginLineNo" "$endLineNo") &
+      ((jobCount++))
 
       # If the number of running jobs reaches the limit, then wait.
-      if [[ $JOB_COUNT -ge $MAX_JOBS ]]; then
+      if [[ $jobCount -ge $maxJobs ]]; then
          wait           # Waiting for all current background tasks to end
-         JOB_COUNT=0    # Reset counter
+         jobCount=0     # Reset counter
       fi
 
       i=$(expr $i + 1)
    done
 
    wait                 # Waiting for the end of the last batch of backend tasks
-   echo '[Info] Processing complete.'
+
+   # Overwrite the temporary file back to the original file
+   /usr/bin/mv -f $filePath.tmp $filePath
+
+   echo "[Info] Processing $filePath complete."
 }
-   # IP ranges got count < 256
-   # source not belong with
-   # destination not belong with
-   # NO MARK
-done
+
+concurrent_process_dnat_exposures() {
+
+   dump_dnat_strategy_tables
+
+   abstract_concurrent_process "process_dnat_exposures" "${WORKING_DIRECTORY}/.tcp4-dnat-exposures"
+   abstract_concurrent_process "process_dnat_exposures" "${WORKING_DIRECTORY}/.udp4-dnat-exposures"
+   abstract_concurrent_process "process_dnat_exposures" "${WORKING_DIRECTORY}/.tcp6-dnat-exposures"
+   abstract_concurrent_process "process_dnat_exposures" "${WORKING_DIRECTORY}/.udp6-dnat-exposures"
+}
+
+#
+# [Info] Listening ports exposures
+#
+process_listening_exposures() {
+
+   local IFS=$'\n'
+   local i=
+
+   load_external_ip_addresses_from_file
+
+   # Reset TCP/UDP listening exposures raw file
+   >${WORKING_DIRECTORY}/.tcp4-listening-exposures
+   >${WORKING_DIRECTORY}/.tcp6-listening-exposures
+   >${WORKING_DIRECTORY}/.udp4-listening-exposures
+   >${WORKING_DIRECTORY}/.udp6-listening-exposures
+
+   # Generate TCP4 listening ports
+   for i in $(ss -4nltp | awk '{print $4,$5,$6}' | tail -n +2); do
+      local listenHost=$(echo "$i" | awk '{print $1}' | sed 's#^\(.*\):[0-9]*$#\1#g')
+      local listenPort=$(echo "$i" | awk '{print $1}' | sed 's#^.*:\([0-9]*\)$#\1#g')
+      if $(check_if_subnet_in_exposure "$listenHost"); then
+         if [ "$listenHost" == "*" ]; then
+            # The asterisk means listening on both IPv4 and IPv6 wildcard addresses simultaneously. Therefore, it is expanded into two listening records.
+            local remoteHost=$(echo "$i" | awk '{print $2}')
+            local note=$(echo "$i" | awk '{print $3}')
+            echo "0.0.0.0:$listenPort $remoteHost $note" >> ${WORKING_DIRECTORY}/.tcp4-listening-exposures
+            echo "[::]:$listenPort $remoteHost $note" >> ${WORKING_DIRECTORY}/.tcp6-listening-exposures
+         else
+            echo $i >> ${WORKING_DIRECTORY}/.tcp4-listening-exposures
+         fi
+      fi
+   done
+
+   # Generate TCP6 listening ports
+   for i in $(ss -6nltp | awk '{print $4,$5,$6}' | tail -n +2); do
+      local listenHost=$(echo "$i" | awk '{print $1}' | sed 's#^\(.*\):[0-9]*$#\1#g')
+      local listenPort=$(echo "$i" | awk '{print $1}' | sed 's#^.*:\([0-9]*\)$#\1#g')
+      if $(check_if_subnet_in_exposure "$listenHost"); then
+         if [ "$listenHost" == "*" ]; then
+            # The asterisk means listening on both IPv4 and IPv6 wildcard addresses simultaneously. Therefore, it is expanded into two listening records.
+            local remoteHost=$(echo "$i" | awk '{print $2}')
+            local note=$(echo "$i" | awk '{print $3}')
+            echo "0.0.0.0:$listenPort $remoteHost $note" >> ${WORKING_DIRECTORY}/.tcp4-listening-exposures
+            echo "[::]:$listenPort $remoteHost $note" >> ${WORKING_DIRECTORY}/.tcp6-listening-exposures
+         else
+            echo $i >> ${WORKING_DIRECTORY}/.tcp6-listening-exposures
+         fi
+      fi
+   done
+
+   # Generate UDP4 listening ports
+   for i in $(ss -4nlup | awk '{print $4,$5,$6}' | tail -n +2); do
+      local listenHost=$(echo "$i" | awk '{print $1}' | sed 's#^\(.*\):[0-9]*$#\1#g')
+      local listenPort=$(echo "$i" | awk '{print $1}' | sed 's#^.*:\([0-9]*\)$#\1#g')
+      if $(check_if_subnet_in_exposure "$listenHost"); then
+         if [ "$listenHost" == "*" ]; then
+            local remoteHost=$(echo "$i" | awk '{print $2}')
+            local note=$(echo "$i" | awk '{print $3}')
+            echo "0.0.0.0:$listenPort $remoteHost $note" >> ${WORKING_DIRECTORY}/.udp4-listening-exposures
+            echo "[::]:$listenPort $remoteHost $note" >> ${WORKING_DIRECTORY}/.udp6-listening-exposures
+         else
+            echo $i >> ${WORKING_DIRECTORY}/.udp4-listening-exposures
+         fi
+      fi
+   done
+
+   # Generate UDP6 listening ports
+   for i in $(ss -6nlup | awk '{print $4,$5,$6}' | tail -n +2); do
+      local listenHost=$(echo "$i" | awk '{print $1}' | sed 's#^\(.*\):[0-9]*$#\1#g')
+      local listenPort=$(echo "$i" | awk '{print $1}' | sed 's#^.*:\([0-9]*\)$#\1#g')
+      if $(check_if_subnet_in_exposure "$listenHost"); then
+         if [ "$listenHost" == "*" ]; then
+            local remoteHost=$(echo "$i" | awk '{print $2}')
+            local note=$(echo "$i" | awk '{print $3}')
+            echo "0.0.0.0:$listenPort $remoteHost $note" >> ${WORKING_DIRECTORY}/.udp4-listening-exposures
+            echo "[::]:$listenPort $remoteHost $note" >> ${WORKING_DIRECTORY}/.udp6-listening-exposures
+         else
+            echo $i >> ${WORKING_DIRECTORY}/.udp6-listening-exposures
+         fi
+      fi
+   done
+}
+
+merge_exposures() {
+
+   # Generate TCP4 exposures
+   # Format TCP4 DNAT exposures: [1] 0.0.0.0/0;<port> → 0.0.0.0:<port> [2] 0.0.0.0:<port1>,<port2> → 0.0.0.0:<port1> and 0.0.0.0:<port2> [3] unique sort
+   local tcp4DnatExposures=($(awk -F';' '{$2 = gensub(/\/0/,"","g",$2); print $2":"$3}' .tcp4-dnat-exposures | awk -F: '{
+      split($2, ports, ",")
+      for (i in ports) {
+         print $1 ":" ports[i]
+      }
+   }' | sort -u))
+
+   # Format TCP4 Listening exposures
+   local tcp4ListeningExposures=($(awk '{print $1}' ${WORKING_DIRECTORY}/.tcp4-listening-exposures | sort -u))
+
+   # Merge TCP4 exposures
+   local tcp4Exposures=( ${tcp4DnatExposures[@]} ${tcp4ListeningExposures[@]} )
+
+   # Eliminate duplicates and save to temporary file
+   echo ${tcp4Exposures[@]} | tr ' ' '\n' | sort -u > .tcp4-exposures.tmp
+
+   # Convert wildcard exposures 0.0.0.0 to specific exposed addresses ( external IP )
+   awk -F: -v ips="${EXTERNAL_IPV4_ADDRESSES[*]}" '
+      BEGIN {
+         split(ips, ip_array, " ")
+      }
+      {
+         if ($1 == "0.0.0.0") {
+            for (i in ip_array) {
+               print ip_array[i] ":" $2
+            }
+         } else {
+            print $0
+         }
+      }' .tcp4-exposures.tmp | sort -u > .tcp4-exposures
+
+   # Generate UDP4 exposures
+   # Format UDP4 DNAT exposures: [1] 0.0.0.0/0;<port> → 0.0.0.0:<port> [2] 0.0.0.0:<port1>,<port2> → 0.0.0.0:<port1> and 0.0.0.0:<port2> [3] unique sort
+   local udp4DnatExposures=($(awk -F';' '{$2 = gensub(/\/0/,"","g",$2); print $2":"$3}' .udp4-dnat-exposures | awk -F: '{
+      split($2, ports, ",")
+      for (i in ports) {
+         print $1 ":" ports[i]
+      }
+   }' | sort -u))
+
+   # Format UDP4 Listening exposures
+   local udp4ListeningExposures=($(awk '{print $1}' ${WORKING_DIRECTORY}/.udp4-listening-exposures | sort -u))
+
+   # Merge UDP4 exposures
+   local udp4Exposures=( ${udp4DnatExposures[@]} ${udp4ListeningExposures[@]} )
+
+   # Eliminate duplicates and save to temporary file
+   echo ${udp4Exposures[@]} | tr ' ' '\n' | sort -u > .udp4-exposures.tmp
+
+   # Convert wildcard exposures 0.0.0.0 to specific exposed addresses ( external IP )
+   awk -F: -v ips="${EXTERNAL_IPV4_ADDRESSES[*]}" '
+      BEGIN {
+         split(ips, ip_array, " ")
+      }
+      {
+         if ($1 == "0.0.0.0") {
+            for (i in ip_array) {
+               print ip_array[i] ":" $2
+            }
+         } else {
+            print $0
+         }
+      }' .udp4-exposures.tmp | sort -u > .udp4-exposures
+
+   # IPv6, TCP
+
+
+   # IPv6, UDP
+}
+
+get_packets_filter_by_exposures () {
+
+   awk -F: '{a[$1]=a[$1]?a[$1]" or dst port "$2:$2} END{for(i in a) print "dst host "i" and ( dst port "a[i]" )"}' .tcp4-exposures | paste -sd " OR "
+}
 
 # 考虑到有些 高版本的k8s集群，由之前的显示监听变为了“端口隐式监听，用ss/netstat查不到显式的LISTEN状态，但端口能接收流量,不创建 “用户# 态监听进程”，而是通过iptables规则直接将宿主机NodePort的流量转发到 Pod（属于 “隐式监听”）
 check_nodeport_netstat() {

@@ -78,7 +78,7 @@ standardize_ip_addresses() {
 
    for ipAddr in ${ipAddrs[@]}; do
       ipAddr=$(python3 -c "import ipaddress; print(ipaddress.ip_network('$ipAddr', strict=False))")
-      result=( ${result[@]} $ipAddr )
+      result=(${result[@]} $ipAddr)
    done
 
    echo "${result[@]}"
@@ -149,9 +149,9 @@ is_subnet_contained() {
 #
 get_docker_subnet_addresses() {
 
-   IFS=$'\n' DOCKER_NETWORK_SUBNETS=($(docker network inspect $(docker network ls -q 2>/dev/null) 2>/dev/null | jq -r '.[] | .IPAM.Config[].Subnet' 2>/dev/null))
+   DOCKER_NETWORK_SUBNETS=($(docker network inspect $(docker network ls -q 2>/dev/null) 2>/dev/null | jq -r '.[] | .IPAM.Config[].Subnet' 2>/dev/null))
 
-   IFS=' ' DOCKER_NETWORK_SUBNETS=($(standardize_ip_addresses ${DOCKER_NETWORK_SUBNETS[@]}))
+   DOCKER_NETWORK_SUBNETS=($(standardize_ip_addresses ${DOCKER_NETWORK_SUBNETS[@]} | tr ' ' '\n'))
 
    echo '[Info] Docker network subnets are as below:'
    echo ${DOCKER_NETWORK_SUBNETS[@]} | tr ' ' '\n' | grep -v '^$' | sed 's#^#   #g'
@@ -181,8 +181,8 @@ get_docker_subnet_addresses() {
 #
 dump_cluster_cidr_from_calico_ds() {
 
-   IFS=$'\n' CLUSTER_CIDR_IPV4=($(kubectl get ds calico-node -n kube-system --request-timeout=8s -o json 2>/dev/null | jq -r -c '.spec.template.spec.containers[].env[]|select(.name=="CALICO_IPV4POOL_CIDR")|.value'))
-   IFS=$'\n' CLUSTER_CIDR_IPV6=($(kubectl get ds calico-node -n kube-system --request-timeout=8s -o json 2>/dev/null | jq -r -c '.spec.template.spec.containers[].env[]|select(.name=="CALICO_IPV6POOL_CIDR")|.value'))
+   CLUSTER_CIDR_IPV4=($(kubectl get ds calico-node -n kube-system --request-timeout=8s -o json 2>/dev/null | jq -r -c '.spec.template.spec.containers[].env[]|select(.name=="CALICO_IPV4POOL_CIDR")|.value'))
+   CLUSTER_CIDR_IPV6=($(kubectl get ds calico-node -n kube-system --request-timeout=8s -o json 2>/dev/null | jq -r -c '.spec.template.spec.containers[].env[]|select(.name=="CALICO_IPV6POOL_CIDR")|.value'))
    CLUSTER_CIDR=(${CLUSTER_CIDR_IPV4[@]} ${CLUSTER_CIDR_IPV6[@]})
 
    echo '[Info] K8s cluster CIDRs are as below:'
@@ -249,7 +249,7 @@ dump_cluster_cidr_from_controller_manager() {
 
    CLUSTER_CIDR_IPV4=()
    CLUSTER_CIDR_IPV6=()
-   IFS=',' CLUSTER_CIDR=($(ps -ef | grep kube-controller-manager | grep 'cluster-cidr' | sed 's#.*--cluster-cidr=\([^ ]*\).*#\1#g'))
+   CLUSTER_CIDR=($(ps -ef | grep kube-controller-manager | grep 'cluster-cidr' | sed 's#.*--cluster-cidr=\([^ ]*\).*#\1#g' | tr ',' '\n'))
    
    local i=
    for i in ${CLUSTER_CIDR[@]}; do
@@ -284,7 +284,7 @@ dump_cluster_cidr_from_kube_proxy() {
 
    CLUSTER_CIDR_IPV4=()
    CLUSTER_CIDR_IPV6=()
-   IFS=',' CLUSTER_CIDR=($(ps -ef | grep kube-proxy | grep 'cluster-cidr' | sed 's#.*--cluster-cidr=\([^ ]*\).*#\1#g'))
+   CLUSTER_CIDR=($(ps -ef | grep kube-proxy | grep 'cluster-cidr' | sed 's#.*--cluster-cidr=\([^ ]*\).*#\1#g' | tr ',' '\n'))
    
    for i in ${CLUSTER_CIDR[@]}; do
       local ipFamily=$(python3 ${WORKING_DIRECTORY}/network-utilities.py --get-ip-family $i)
@@ -360,7 +360,7 @@ dump_service_cidr_from_controller_manager() {
 
    SERVICE_CIDR_IPV4=()
    SERVICE_CIDR_IPV6=()
-   IFS=',' SERVICE_CIDR=($(ps -ef | grep kube-controller-manager | grep '\--service-cluster-ip-range' | sed 's#.*--service-cluster-ip-range=\([^ ]*\).*#\1#g'))
+   SERVICE_CIDR=($(ps -ef | grep kube-controller-manager | grep '\--service-cluster-ip-range' | sed 's#.*--service-cluster-ip-range=\([^ ]*\).*#\1#g' | tr ',' '\n'))
    
    local i=
    for i in ${SERVICE_CIDR[@]}; do
@@ -392,7 +392,7 @@ dump_service_cidr_from_kube_apiserver() {
 
    SERVICE_CIDR_IPV4=()
    SERVICE_CIDR_IPV6=()
-   IFS=',' SERVICE_CIDR=($(ps -ef | grep kube-apiserver | grep '\--service-cluster-ip-range' | sed 's#.*--service-cluster-ip-range=\([^ ]*\).*#\1#g'))
+   SERVICE_CIDR=($(ps -ef | grep kube-apiserver | grep '\--service-cluster-ip-range' | sed 's#.*--service-cluster-ip-range=\([^ ]*\).*#\1#g' | tr ',' '\n'))
    
    local i=
    for i in ${SERVICE_CIDR[@]}; do
@@ -560,19 +560,24 @@ get_external_ip_addresses() {
    get_vmware_subnet_addresses
 
    # Merge all virtual network IP addresses
-   INTERNAL_SUBNET_ADDRESSES=( ${DOCKER_NETWORK_SUBNETS[@]} ${CLUSTER_CIDR[@]} ${SERVICE_CIDR[@]} ${KVM_SUBNET_ADDRESSES[@]} ${VMWARE_SUBNET_ADDRESSES[@]} ${STORAGE_SUBNETS[@]} ${MANAGEMENT_SUBNETS[@]})
+   INTERNAL_SUBNET_ADDRESSES=( ${DOCKER_NETWORK_SUBNETS[@]} ${CLUSTER_CIDR[@]} ${SERVICE_CIDR[@]} ${KVM_SUBNET_ADDRESSES[@]} ${VMWARE_SUBNET_ADDRESSES[@]} ${STORAGE_SUBNETS[@]} ${MANAGEMENT_SUBNETS[@]} )
+   echo "[Info] INTERNAL_SUBNET_ADDRESSES → ${#INTERNAL_SUBNET_ADDRESSES[@]} elements."
    
    # Get all IP addresses of all physical or bonding interfaces. By filtering known virtual bridges, the purpose of this step is to supplement and improve the internal subnet addresses previously sorted out
    local i=
    local j=
    local ipv4Addresses=()
    local ipv6Addresses=()
-   local IFS=$'\n'
 
    for i in $(ip link show | awk -F': ' '/^[0-9]+: / {print $2}' | grep -vE '^lo$|^vmnet|^virbr|^br|^tun|^tap|^veth|^docker|^vnet|^cali|^flannel|^vxlan|^kube-ipvs|^dummy'); do
 
       ipv4Addresses=($(ip addr show dev "$i" | grep -w "inet" | sed 's#.*inet \([^/]*\)/[0-9]*.*#\1#g'))
       ipv6Addresses=($(ip addr show dev "$i" | grep -w "inet6" | grep -v 'fe80' | sed 's#.*inet6 \([^/]*\)/[0-9]*.*#\1#g'))
+
+      echo "[Info] $i got ${#ipv4Addresses[@]} IPv4 addresses: ${ipv4Addresses[@]:-<empty>}."
+      echo "[Info] $i got ${#ipv6Addresses[@]} IPv6 addresses: ${ipv6Addresses[@]:-<empty>}."
+
+      exit 0
 
       for j in ${ipv4Addresses[@]}; do
          # Check if belonging to internal subnet addresses
@@ -591,7 +596,7 @@ get_external_ip_addresses() {
    done
 
    # Merge IPv4 and IPv6 addresses
-   EXTERNAL_IP_ADDRESSES=( ${EXTERNAL_IPV4_ADDRESSES[@]} ${EXTERNAL_IPV6_ADDRESSES[@]})
+   EXTERNAL_IP_ADDRESSES=( ${EXTERNAL_IPV4_ADDRESSES[@]} ${EXTERNAL_IPV6_ADDRESSES[@]} )
 
    echo '[Info] All external IP addresses of this host are as below:'
    echo ${EXTERNAL_IP_ADDRESSES[@]} | tr ' ' '\n' | sed 's#^#   #g'
@@ -617,20 +622,20 @@ get_external_ip_addresses() {
 #
 get_additional_ip_addresses() {
 
-   IFS=$'\n' ADDITIONAL_IPV4_ADDRESSES=($(ip addr | grep -w 'secondary' | grep -w 'inet' | sed 's#.*inet \([^/]*\)/[0-9]*.*#\1#g'))
-   IFS=$'\n' ADDITIONAL_IPV6_ADDRESSES=($(ip addr | grep -w 'secondary' | grep -w 'inet6' | grep -v 'fe80' | sed 's#.*inet6 \([^/]*\)/[0-9]*.*#\1#g'))
+   ADDITIONAL_IPV4_ADDRESSES=($(ip addr | grep -w 'secondary' | grep -w 'inet' | sed 's#.*inet \([^/]*\)/[0-9]*.*#\1#g'))
+   ADDITIONAL_IPV6_ADDRESSES=($(ip addr | grep -w 'secondary' | grep -w 'inet6' | grep -v 'fe80' | sed 's#.*inet6 \([^/]*\)/[0-9]*.*#\1#g'))
 
    if [ ${#ADDITIONAL_IPV4_ADDRESSES[@]} -ne 0 ]; then
-      (IFS=$'\n'; echo "${ADDITIONAL_IPV4_ADDRESSES[*]}") > .addtitional-ipv4
+      echo ${ADDITIONAL_IPV4_ADDRESSES[@]} | tr ' ' '\n' > .addtitional-ipv4
    fi
 
    if [ ${#ADDITIONAL_IPV6_ADDRESSES[@]} -ne 0 ]; then
-      (IFS=$'\n'; echo "${ADDITIONAL_IPV6_ADDRESSES[*]}") > .addtitional-ipv6
+      echo ${ADDITIONAL_IPV6_ADDRESSES[@]} | tr ' ' '\n' > .addtitional-ipv6
    fi
 
    ADDITIONAL_IP_ADDRESSES=( ${ADDITIONAL_IPV4_ADDRESSES[@]} ${ADDITIONAL_IPV6_ADDRESSES[@]} )
    if [ ${#ADDITIONAL_IP_ADDRESSES[@]} -ne 0 ]; then
-      (IFS=$'\n'; echo "${ADDITIONAL_IP_ADDRESSES[*]}") > .addtitional-ip
+      echo ${ADDITIONAL_IP_ADDRESSES[@]} | tr ' ' '\n' > .addtitional-ip
    fi
 
    echo '[Info] All additional IP addresses of this host are as below:'
@@ -652,13 +657,13 @@ get_current_ip_environment() {
       CURRENT_IPV4=$(ip a show dev ${DEFAULT_NETWORK_INTERFACE} | grep -w 'inet' | grep -v -w 'secondary' | sed 's#.*inet \([^/]*\)/[0-9]*.*#\1#g' | head -1)
       echo "[Info] The primary IPv4 address of ${DEFAULT_NETWORK_INTERFACE} is ${CURRENT_IPV4:-<empty>}."
 
-      IFS=$'\n' ADDITIONAL_IPV4=($(ip a show dev ${DEFAULT_NETWORK_INTERFACE} | grep -w 'inet' | grep -w 'secondary' | sed 's#.*inet \([^/]*\)/[0-9]*.*#\1#g'))
+      ADDITIONAL_IPV4=($(ip a show dev ${DEFAULT_NETWORK_INTERFACE} | grep -w 'inet' | grep -w 'secondary' | sed 's#.*inet \([^/]*\)/[0-9]*.*#\1#g'))
       echo "[Info] The additional IPv4 addresses of ${DEFAULT_NETWORK_INTERFACE} is ${ADDITIONAL_IPV4[@]:-<empty>}."
 
       CURRENT_IPV6=$(ip a show dev ${DEFAULT_NETWORK_INTERFACE} | grep -w 'inet6' | grep -v -w 'secondary' | grep -v 'fe80' | sed 's#.*inet6 \([^/]*\)/[0-9]*.*#\1#g' | head -1)
       echo "[Info] The primary IPv6 address of ${DEFAULT_NETWORK_INTERFACE} is ${CURRENT_IPV6:-<empty>}."
 
-      IFS=$'\n' ADDITIONAL_IPV6=($(ip a show dev ${DEFAULT_NETWORK_INTERFACE} | grep -w 'inet6' | grep -w 'secondary' | grep -v 'fe80' | sed 's#.*inet6 \([^/]*\)/[0-9]*.*#\1#g'))
+      ADDITIONAL_IPV6=($(ip a show dev ${DEFAULT_NETWORK_INTERFACE} | grep -w 'inet6' | grep -w 'secondary' | grep -v 'fe80' | sed 's#.*inet6 \([^/]*\)/[0-9]*.*#\1#g'))
       echo "[Info] The additional IPv6 addresses of ${DEFAULT_NETWORK_INTERFACE} is ${ADDITIONAL_IPV6[@]:-<empty>}."
 
       [ "${PREFER_IPV6}" = "false" ] && CURRENT_IP=${CURRENT_IPV4}
@@ -696,11 +701,11 @@ get_current_ip_environment() {
    local different_set=()
 
    if ! ${PREFER_IPV6}; then
-      IFS=$'\n' intersection=($(echo ${EXTERNAL_IPV4_ADDRESSES[@]} ${ADDITIONAL_IPV4_ADDRESSES[@]} | sed 's# #\n#g' | sort | uniq -d))
-      IFS=$'\n' different_set=($(echo ${EXTERNAL_IPV4_ADDRESSES[@]} ${intersection[@]} | sed 's# #\n#g' | sort | uniq -u))
+      intersection=($(echo ${EXTERNAL_IPV4_ADDRESSES[@]} ${ADDITIONAL_IPV4_ADDRESSES[@]} | sed 's# #\n#g' | sort | uniq -d))
+      different_set=($(echo ${EXTERNAL_IPV4_ADDRESSES[@]} ${intersection[@]} | sed 's# #\n#g' | sort | uniq -u))
    else
-      IFS=$'\n' intersection=($(echo ${EXTERNAL_IPV6_ADDRESSES[@]} ${ADDITIONAL_IPV6_ADDRESSES[@]} | sed 's# #\n#g' | sort | uniq -d))
-      IFS=$'\n' different_set=($(echo ${EXTERNAL_IPV6_ADDRESSES[@]} ${intersection[@]} | sed 's# #\n#g' | sort | uniq -u))
+      intersection=($(echo ${EXTERNAL_IPV6_ADDRESSES[@]} ${ADDITIONAL_IPV6_ADDRESSES[@]} | sed 's# #\n#g' | sort | uniq -d))
+      different_set=($(echo ${EXTERNAL_IPV6_ADDRESSES[@]} ${intersection[@]} | sed 's# #\n#g' | sort | uniq -u))
    fi
 
    if [ ${#different_set[@]} -ne 0 ]; then
@@ -734,9 +739,9 @@ get_external_interfaces() {
 
    for ifName in $(ip link show | awk -F': ' '/^[0-9]+: / {print $2}' | grep -vE '^lo$|^vmnet|^virbr|^br|^tun|^tap|^veth|^docker|^vnet|^cali|^flannel|^vxlan|^kube-ipvs|^dummy'); do
 
-      IFS=$'\n' ipv4Addresses=($(ip -4 addr show dev "$ifName" 2>/dev/null | grep inet | awk '{print $2}'))
+      ipv4Addresses=($(ip -4 addr show dev "$ifName" 2>/dev/null | grep inet | awk '{print $2}'))
       # Check IPv6 address (global unicast address)
-      IFS=$'\n' ipv6Addresses=($(ip -6 addr show dev "$ifName" 2>/dev/null | grep inet6 | grep -v fe80:: | awk '{print $2}'))
+      ipv6Addresses=($(ip -6 addr show dev "$ifName" 2>/dev/null | grep inet6 | grep -v fe80:: | awk '{print $2}'))
     
       # Network cards without IPv4/6 addresses are filtered out
       if [ ${#ipv4Addresses[@]} -ne 0 ] || [ ${#ipv6Addresses[@]} -ne 0 ]; then
