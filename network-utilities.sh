@@ -449,6 +449,38 @@ get_service_cidr() {
    fi
 }
 
+get_k8s_nodes_ip_addresses() {
+
+   K8S_NODES_IPV4_ADDRESSES=()
+   K8S_NODES_IPV6_ADDRESSES=()
+   K8S_NODES_IP_ADDRESSES=($(kubectl get node --request-timeout=8s -o json 2>/dev/null | jq -r -c '.items[].status.addresses[]|select(.type=="InternalIP")|.address' 2>/dev/null))
+
+   local i=
+   for i in ${K8S_NODES_IP_ADDRESSES[@]}; do
+      local ipFamily=$(python3 ${WORKING_DIRECTORY}/network-utilities.py --get-ip-family $i)
+      if [ "$ipFamily" == "IPv4" ]; then
+         K8S_NODES_IPV4_ADDRESSES=(${K8S_NODES_IPV4_ADDRESSES[@]} "$i")
+      elif [ "$ipFamily" == "IPv6" ]; then
+         K8S_NODES_IPV6_ADDRESSES=(${K8S_NODES_IPV6_ADDRESSES[@]} "$i")
+      fi
+   done
+
+   echo '[Info] IP addresses of K8s nodes are as below:'
+   echo "${K8S_NODES_IP_ADDRESSES[@]}" | tr ' ' '\n' | sed 's#^#   #g'
+
+   if [ ${#K8S_NODES_IPV4_ADDRESSES[@]} -ne 0 ]; then
+      echo ${K8S_NODES_IPV4_ADDRESSES[@]} | tr ' ' '\n' > ${WORKING_DIRECTORY}/.k8s-nodes-ipv4
+   fi
+
+   if [ ${#K8S_NODES_IPV6_ADDRESSES[@]} -ne 0 ]; then
+      echo ${K8S_NODES_IPV6_ADDRESSES[@]} | tr ' ' '\n' > ${WORKING_DIRECTORY}/.k8s-nodes-ipv6
+   fi
+
+   if [ ${#K8S_NODES_IP_ADDRESSES[@]} -ne 0 ]; then
+      echo ${K8S_NODES_IP_ADDRESSES[@]} | tr ' ' '\n' > ${WORKING_DIRECTORY}/.k8s-nodes
+   fi
+}
+
 #
 # [Note] KVM Virtual Network IP addresses. The name of the KVM virtual network card can be specified arbitrarily, not limited to virbr_, so it should be obtained using professional management tools.
 #
@@ -576,8 +608,6 @@ get_external_ip_addresses() {
 
       echo "[Info] $i got ${#ipv4Addresses[@]} IPv4 addresses: ${ipv4Addresses[@]:-<empty>}."
       echo "[Info] $i got ${#ipv6Addresses[@]} IPv6 addresses: ${ipv6Addresses[@]:-<empty>}."
-
-      exit 0
 
       for j in ${ipv4Addresses[@]}; do
          # Check if belonging to internal subnet addresses
@@ -765,6 +795,7 @@ add_secondary_addresses() {
    local j=
 
    for i in $(jq -r -c .[] ${WORKING_DIRECTORY}/.secondary-addresses); do
+      
       local ifName=$(echo $i | jq -r -c 'keys[0]')
       local ipAddresses=($(echo $i | jq -r -c .$ifName[]))
       for j in ${ipAddresses[@]}; do
@@ -772,6 +803,8 @@ add_secondary_addresses() {
          eval "$k"
          echo "[Info] $k √"
       done
+
+      ip addr show dev $ifName
    done
 }
 
@@ -786,13 +819,16 @@ del_secondary_addresses() {
    local j=
 
    for i in $(jq -r -c .[] ${WORKING_DIRECTORY}/.secondary-addresses); do
+      
       local ifName=$(echo $i | jq -r -c 'keys[0]')
       local ipAddresses=($(echo $i | jq -r -c .$ifName[]))
-      for j in ${ifName[@]}; do
-         local k="ip addr del $j dev $ifname"
+      for j in ${ipAddresses[@]}; do
+         local k="ip addr del $j dev $ifName"
          eval "$k"
          echo "[Info] $k √"
       done
+
+      ip addr show dev $ifName
    done
 }
 
@@ -810,6 +846,7 @@ orderedPara=(
    "--dump-service-cidr-from-controller-manager"
    "--dump-service-cidr-from-kube-apiserver"
    "--get-service-cidr"
+   "--get-k8s-nodes-ip-addresses"
    "--get-kvm-subnet-addresses"
    "--get-vmware-subnet-addresses"
    "--get-external-ip-addresses"
@@ -835,6 +872,7 @@ declare -A mapParaFunc=(
    ["--dump-service-cidr-from-controller-manager"]="dump_service_cidr_from_controller_manager"
    ["--dump-service-cidr-from-kube-apiserver"]="dump_service_cidr_from_kube_apiserver"
    ["--get-service-cidr"]="get_service_cidr"
+   ["--get-k8s-nodes-ip-addresses"]="get_k8s_nodes_ip_addresses"
    ["--get-kvm-subnet-addresses"]="get_kvm_subnet_addresses"
    ["--get-vmware-subnet-addresses"]="get_vmware_subnet_addresses"
    ["--get-external-ip-addresses"]="get_external_ip_addresses"
@@ -860,6 +898,7 @@ declare -A mapParaSpec=(
    ["--dump-service-cidr-from-controller-manager"]="Get K8s service CIDRs from kube-controller-manager parameters, and save to hidden files."
    ["--dump-service-cidr-from-kube-apiserver"]="Get K8s service CIDRs from kube-apiserver parameters, and save to hidden files."
    ["--get-service-cidr"]="Save K8s service CIDRs into hidden files, we will try the 2 methods mentioned above one by one and guide you to find the effective one."
+   ["--get-k8s-nodes-ip-addresses"]="Load real IP of K8s nodes, and save in a hidden file."
    ["--get-kvm-subnet-addresses"]="Save subnets of KVM virtual network interfaces into a hidden file."
    ["--get-vmware-subnet-addresses"]="Save subnets of VMware Workstation virtual network interfaces into a hidden file."
    ["--get-external-ip-addresses"]="Save all external IP addresses to a specified hidden file: .external-ip."
