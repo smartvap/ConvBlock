@@ -335,6 +335,135 @@ load_k8s_nodes_ip_addresses_from_file() {
 #########################################
 
 #
+# [Note] On the basis of the original grouping and merging function, add functions such as deduplication, sorting, and quantity limitation. Group according to the first column, with members in each group in the second column, separated by commas, with a maximum of 15 members in each group.
+# [Usage]
+# echo '
+#    192.168.0.1 8009
+#    192.168.0.1 8005
+#    192.168.0.2 7003
+#    192.168.0.1 8001
+#    192.168.0.1 8015
+#    192.168.0.1 8010
+#    192.168.0.1 8007
+#    192.168.0.1 8004
+#    192.168.0.1 8011
+#    192.168.0.2 7002
+#    192.168.0.1 8008
+#    192.168.0.1 8004
+#    192.168.0.1 8002
+#    192.168.0.1 8006
+#    192.168.0.1 8003
+#    192.168.0.1 8014
+#    192.168.0.1 8012
+#    192.168.0.1 8013
+#    192.168.0.2 7001
+#    192.168.0.1 8016
+#    192.168.0.1 8017
+#    192.168.0.1 8018
+# ' | group_by_1st_column
+#
+group_by_1st_column() {
+   awk '
+   {
+      # De duplication: Each second column value corresponding to the first column is only recorded once
+      if (!seen[$1","$2]++) {
+         # Record values and mark the need for sorting
+         value_count[$1]++
+         values[$1][value_count[$1]] = $2
+      }
+   }
+   END {
+      # Traverse all groups
+      for (key in values) {
+         count = 0
+         group_index = 1
+         result = ""
+         
+         # Sort values numerically
+         n = value_count[key]
+         for (i = 1; i <= n; i++) {
+            temp_arr[i] = values[key][i]
+         }
+         asort(temp_arr, sorted_values)
+         
+         # Build group output
+         for (i = 1; i <= n; i++) {
+            if (count++ > 0) result = result ","
+            result = result sorted_values[i]
+               
+            if (count >= 15) {
+               print key " " result
+               result = ""
+               count = 0
+               group_index++
+            }
+         }
+            
+         if (count > 0) {
+            print key " " result
+         }
+      }
+   }'
+}
+
+#
+# [Note] Group according to the first column, with members in each group in the second column, separated by commas. There is no upper limit to the number of members in each group.
+#
+group_by_1st_column_no_limit() {
+   awk '
+   {
+      # De duplication: Each second column value corresponding to the first column is only recorded once
+      if (!seen[$1","$2]++) {
+         # Record values and mark the need for sorting
+         value_count[$1]++
+         values[$1][value_count[$1]] = $2
+      }
+   }
+   END {
+      # Traverse all groups
+      for (key in values) {
+         count = 0
+         group_index = 1
+         result = ""
+         
+         # Sort values numerically
+         n = value_count[key]
+         for (i = 1; i <= n; i++) {
+            temp_arr[i] = values[key][i]
+         }
+         asort(temp_arr, sorted_values)
+         
+         # Build group output
+         for (i = 1; i <= n; i++) {
+            if (count++ > 0) result = result ","
+            result = result sorted_values[i]
+         }
+         
+         if (count > 0) {
+            print key " " result
+         }
+      }
+   }'
+}
+
+#
+# [Note] This operation is in high dangerous
+#
+overwrite_shell_script_header() {
+
+   local filePath=$1
+
+   touch $filePath
+
+   echo '#!/bin/bash' > $filePath
+   echo >> $filePath
+   echo '# [Note] The current script is automatically created by the program. Please review it strictly before executing it.' >> $filePath
+   echo '# [Warn] If you confirm that it can be executed, please uncomment the following line.' >> $filePath
+   echo 'exit -1' >> $filePath
+   echo >> $filePath
+}
+
+#
 # [Note] The abstract function of parallel processing includes three parameters: the name of the processing function, the file to be processed, and the number of records processed by a single process
 #
 abstract_concurrent_process() {
@@ -1320,22 +1449,54 @@ merge_exposures() {
 }
 
 #
-# [Note] Preventive iptables strategies opening is necessary to prevent ports from being inaccessible during wildcard network security reinforcement on the host. For example, adding the 0.0.0.0/0 to 0.0.0.0/0 ANY REJECT policy may cause communication failure between containers sharing the same docker container bridge on the current node. Therefore, it is necessary to open the DOCKER-BRIDGE-SUBNET TO DOCKER-BRIDGE-SUBNET ANY ALLOW strategy.
+# [Note] Preventive iptables strategies opening (预防性策略放通) is necessary to prevent ports from being inaccessible during wildcard network security reinforcement on the host. For example, adding the 0.0.0.0/0 to 0.0.0.0/0 ANY REJECT policy may cause communication failure between containers sharing the same docker container bridge on the current node. Therefore, it is necessary to open the DOCKER-BRIDGE-SUBNET TO DOCKER-BRIDGE-SUBNET ANY ALLOW strategy.
 #
 preventive_iptables_allow_rules() {
+
+   local i=
    
    load_docker_subnet_addresses_from_file
    load_cluster_cidr_from_file
    load_service_cidr_from_file
    load_kvm_subnet_addresses_from_file
    load_vmware_subnet_addresses_from_file
-   load_k8s_nodes_ip_addresses_from_file
    # Don't forget the loopback subnets
+
+   overwrite_shell_script_header ${WORKING_DIRECTORY}/.preventive-allow-script
+
+   echo "ipset create permit-subnets-ipv4 hash:net" >> ${WORKING_DIRECTORY}/.preventive-allow-script
+   echo "ipset create permit-subnets-ipv6 hash:net" >> ${WORKING_DIRECTORY}/.preventive-allow-script
+
+   for i in ${DOCKER_NETWORK_SUBNETS_IPV4[@]} ${CLUSTER_CIDR_IPV4[@]} ${SERVICE_CIDR_IPV4[@]} ${KVM_SUBNET_ADDRESSES_IPV4[@]} ${VMWARE_SUBNET_ADDRESSES_IPV4[@]} ${LOOPBACK_SUBNETS_IPV4}; do
+      echo "ipset add permit-subnets-ipv4 $i" >> ${WORKING_DIRECTORY}/.preventive-allow-script
+   done
+
+   for i in ${DOCKER_NETWORK_SUBNETS_IPV6[@]} ${CLUSTER_CIDR_IPV6[@]} ${SERVICE_CIDR_IPV6[@]} ${KVM_SUBNET_ADDRESSES_IPV6[@]} ${VMWARE_SUBNET_ADDRESSES_IPV6[@]} ${LOOPBACK_SUBNETS_IPV6}; do
+      echo "ipset add permit-subnets-ipv6 $i" >> ${WORKING_DIRECTORY}/.preventive-allow-script
+   done
+
+   # TCP4/UDP4 OUTBOUND
+   echo "iptables -t raw -C PREROUTING -m set --match-set permit-subnets-ipv4 src -m comment --comment \"Unified Access Control\" -j ACCEPT || \\" >> ${WORKING_DIRECTORY}/.preventive-allow-script
+   echo "iptables -t raw -I PREROUTING -m set --match-set permit-subnets-ipv4 src -m comment --comment \"Unified Access Control\" -j ACCEPT" >> ${WORKING_DIRECTORY}/.preventive-allow-script
+
+   # TCP4/UDP4 INBOUND
+   echo "iptables -t raw -C PREROUTING -m set --match-set permit-subnets-ipv4 dst -m comment --comment \"Unified Access Control\" -j ACCEPT || \\" >> ${WORKING_DIRECTORY}/.preventive-allow-script
+   echo "iptables -t raw -I PREROUTING -m set --match-set permit-subnets-ipv4 dst -m comment --comment \"Unified Access Control\" -j ACCEPT" >> ${WORKING_DIRECTORY}/.preventive-allow-script
+
+   # TCP6/UDP6 OUTBOUND
+   echo "ip6tables -t raw -C PREROUTING -m set --match-set permit-subnets-ipv6 src -m comment --comment \"Unified Access Control\" -j ACCEPT || \\" >> ${WORKING_DIRECTORY}/.preventive-allow-script
+   echo "ip6tables -t raw -I PREROUTING -m set --match-set permit-subnets-ipv6 src -m comment --comment \"Unified Access Control\" -j ACCEPT" >> ${WORKING_DIRECTORY}/.preventive-allow-script
+
+   # TCP6/UDP6 INBOUND
+   echo "ip6tables -t raw -C PREROUTING -m set --match-set permit-subnets-ipv6 dst -m comment --comment \"Unified Access Control\" -j ACCEPT || \\" >> ${WORKING_DIRECTORY}/.preventive-allow-script
+   echo "ip6tables -t raw -I PREROUTING -m set --match-set permit-subnets-ipv6 dst -m comment --comment \"Unified Access Control\" -j ACCEPT" >> ${WORKING_DIRECTORY}/.preventive-allow-script
+
+   echo "[Info] The preventive iptables allow rules have been saved in ${WORKING_DIRECTORY}/.preventive-allow-script"
 }
 
 get_packets_filter_file_by_exposures () {
 
-   # Load private client subnets of current host. It should be noted that service CIDR can only be used as the destination, not as the client.
+   # Load private client subnets of current host. It should be noted that service CIDR can only be used as the destination, not as the client. In addition, traffic capture will be performed on external network interfaces rather than [any], so the filtering conditions for the loopback network can be ignored.
    load_docker_subnet_addresses_from_file
    load_cluster_cidr_from_file
    load_kvm_subnet_addresses_from_file
@@ -1464,10 +1625,163 @@ concurrently_run_packets_captures() {
    done
 }
 
+#
+# [Note]
+#
 get_iptables_allow_rules_from_connections_summary() {
 
-   :
-   # 
+   local IFS=$'\n'
+   local i=
+   local j=
+
+   if [ -f ${WORKING_DIRECTORY}/.tcp4-connections-summary ]; then
+
+      overwrite_shell_script_header ${WORKING_DIRECTORY}/.tcp4-exposures-allow-script
+      
+      for i in $(awk -F, '{print $2,$1}' ${WORKING_DIRECTORY}/.tcp4-connections-summary | group_by_1st_column_no_limit); do
+
+         local sourceHosts=($(echo "$i" | awk '{print $2}' | tr ',' '\n'))
+         local destinationHost=$(echo "$i" | awk '{print $1}' | sed 's#^\(.*\)\.\([0-9]*\)$#\1#g')
+         local destinationPort=$(echo "$i" | awk '{print $1}' | sed 's#^\(.*\)\.\([0-9]*\)$#\2#g')
+
+         if [ -z "$sourceHosts" ] || [ -z "$destinationHost" ] || [ -z "$destinationPort" ]; then
+            # ignore invalid lines
+            continue
+         fi
+
+         echo "# Permission rules for $destinationHost:$destinationPort" >> ${WORKING_DIRECTORY}/.tcp4-exposures-allow-script
+
+         echo "ipset destroy allowed_tcp4_to_$destinationHost:$destinationPort" >> ${WORKING_DIRECTORY}/.tcp4-exposures-allow-script
+
+         echo "ipset create allowed_tcp4_to_$destinationHost:$destinationPort hash:ip" >> ${WORKING_DIRECTORY}/.tcp4-exposures-allow-script
+
+         for j in ${sourceHosts[@]}; do
+            echo "ipset add allowed_tcp4_to_$destinationHost:$destinationPort $j" >> ${WORKING_DIRECTORY}/.tcp4-exposures-allow-script
+         done
+
+         echo "iptables -t raw -C PREROUTING -p tcp -m set --match-set allowed_tcp4_to_$destinationHost:$destinationPort src -d $destinationHost --dport $destinationPort -m comment --comment \"Unified Access Control\" -j ACCEPT || \\" >> ${WORKING_DIRECTORY}/.tcp4-exposures-allow-script
+
+         echo "iptables -t raw -I PREROUTING -p tcp -m set --match-set allowed_tcp4_to_$destinationHost:$destinationPort src -d $destinationHost --dport $destinationPort -m comment --comment \"Unified Access Control\" -j ACCEPT" >> ${WORKING_DIRECTORY}/.tcp4-exposures-allow-script
+
+         echo >> ${WORKING_DIRECTORY}/.tcp4-exposures-allow-script
+
+      done
+
+      echo "[Info] The TCP4 allow rules have been saved in ${WORKING_DIRECTORY}/.tcp4-exposures-allow-script"
+   fi
+
+   if [ -f ${WORKING_DIRECTORY}/.udp4-connections-summary ]; then
+
+      overwrite_shell_script_header ${WORKING_DIRECTORY}/.udp4-exposures-allow-script
+      
+      for i in $(awk -F, '{print $2,$1}' ${WORKING_DIRECTORY}/.udp4-connections-summary | group_by_1st_column_no_limit); do
+
+         local sourceHosts=($(echo "$i" | awk '{print $2}' | tr ',' '\n'))
+         local destinationHost=$(echo "$i" | awk '{print $1}' | sed 's#^\(.*\)\.\([0-9]*\)$#\1#g')
+         local destinationPort=$(echo "$i" | awk '{print $1}' | sed 's#^\(.*\)\.\([0-9]*\)$#\2#g')
+
+         if [ -z "$sourceHosts" ] || [ -z "$destinationHost" ] || [ -z "$destinationPort" ]; then
+            # ignore invalid lines
+            continue
+         fi
+
+         echo "# Permission rules for $destinationHost:$destinationPort" >> ${WORKING_DIRECTORY}/.udp4-exposures-allow-script
+
+         echo "ipset destroy allowed_udp4_to_$destinationHost:$destinationPort" >> ${WORKING_DIRECTORY}/.udp4-exposures-allow-script
+
+         echo "ipset create allowed_udp4_to_$destinationHost:$destinationPort hash:ip" >> ${WORKING_DIRECTORY}/.udp4-exposures-allow-script
+
+         for j in ${sourceHosts[@]}; do
+            echo "ipset add allowed_udp4_to_$destinationHost:$destinationPort $j" >> ${WORKING_DIRECTORY}/.udp4-exposures-allow-script
+         done
+
+         echo "iptables -t raw -C PREROUTING -p udp -m set --match-set allowed_udp4_to_$destinationHost:$destinationPort src -d $destinationHost --dport $destinationPort -m comment --comment \"Unified Access Control\" -j ACCEPT || \\" >> ${WORKING_DIRECTORY}/.udp4-exposures-allow-script
+
+         echo "iptables -t raw -I PREROUTING -p udp -m set --match-set allowed_udp4_to_$destinationHost:$destinationPort src -d $destinationHost --dport $destinationPort -m comment --comment \"Unified Access Control\" -j ACCEPT" >> ${WORKING_DIRECTORY}/.udp4-exposures-allow-script
+
+         echo >> ${WORKING_DIRECTORY}/.udp4-exposures-allow-script
+
+      done
+
+      echo "[Info] The TCP4 allow rules have been saved in ${WORKING_DIRECTORY}/.tcp4-exposures-allow-script"
+   fi
+}
+
+#
+# [Note] Generate iptables blocking strategy script based on port exposure surface file.
+#
+get_iptables_reject_rules_from_exposures() {
+
+   local IFS=$'\n'
+   local i=
+
+   if [ -f ${WORKING_DIRECTORY}/.tcp4-exposures ]; then
+
+      overwrite_shell_script_header ${WORKING_DIRECTORY}/.tcp4-exposures-reject
+
+      # Convert the list of <HOST_IP>:<EXPOSED_PORT> to <HOST_IP> <EXPOSED_PORT_1>[,<EXPOSED_PORT_1>...] format
+      for i in $(awk -F':' '{print $1,$2}' ${WORKING_DIRECTORY}/.tcp4-exposures | group_by_1st_column); do
+         
+         local dstHost=$(echo "$i" | awk '{print $1}')
+         local dstPorts=$(echo "$i" | awk '{print $2}')
+
+         echo "iptables -t raw -C PREROUTING -d $dstHost -p tcp -m multiport --dports $dstPorts -m comment --comment \"Unified Access Control\" -j DROP || \\" >> ${WORKING_DIRECTORY}/.tcp4-exposures-reject
+         echo "iptables -t raw -A PREROUTING -d $dstHost -p tcp -m multiport --dports $dstPorts -m comment --comment \"Unified Access Control\" -j DROP" >> ${WORKING_DIRECTORY}/.tcp4-exposures-reject
+      done
+
+      echo "[Info] The TCP4 reject rules have been saved in ${WORKING_DIRECTORY}/.tcp4-exposures-reject"
+   fi
+
+   if [ -f ${WORKING_DIRECTORY}/.udp4-exposures ]; then
+
+      overwrite_shell_script_header ${WORKING_DIRECTORY}/.udp4-exposures-reject
+
+      # Convert the list of <HOST_IP>:<EXPOSED_PORT> to <HOST_IP> <EXPOSED_PORT_1>[,<EXPOSED_PORT_1>...] format
+      for i in $(awk -F':' '{print $1,$2}' ${WORKING_DIRECTORY}/.udp4-exposures | group_by_1st_column); do
+         
+         local dstHost=$(echo "$i" | awk '{print $1}')
+         local dstPorts=$(echo "$i" | awk '{print $2}')
+
+         echo "iptables -t raw -C PREROUTING -d $dstHost -p udp -m multiport --dports $dstPorts -m comment --comment \"Unified Access Control\" -j DROP || \\" >> ${WORKING_DIRECTORY}/.udp4-exposures-reject
+         echo "iptables -t raw -A PREROUTING -d $dstHost -p udp -m multiport --dports $dstPorts -m comment --comment \"Unified Access Control\" -j DROP" >> ${WORKING_DIRECTORY}/.udp4-exposures-reject
+      done
+
+      echo "[Info] The UDP4 reject rules have been saved in ${WORKING_DIRECTORY}/.udp4-exposures-reject"
+   fi
+
+   if [ -f ${WORKING_DIRECTORY}/.tcp6-exposures ]; then
+
+      overwrite_shell_script_header ${WORKING_DIRECTORY}/.tcp6-exposures-reject
+
+      # Convert the list of <HOST_IP>:<EXPOSED_PORT> to <HOST_IP> <EXPOSED_PORT_1>[,<EXPOSED_PORT_1>...] format
+      for i in $(sed 's#^\[\(.*\)\]:\([0-9]*\)$#\1 \2#g' ${WORKING_DIRECTORY}/.tcp6-exposures | group_by_1st_column); do
+         
+         local dstHost=$(echo "$i" | awk '{print $1}')
+         local dstPorts=$(echo "$i" | awk '{print $2}')
+
+         echo "ip6tables -t raw -C PREROUTING -d $dstHost -p udp -m multiport --dports $dstPorts -m comment --comment \"Unified Access Control\" -j DROP || \\" >> ${WORKING_DIRECTORY}/.tcp6-exposures-reject
+         echo "ip6tables -t raw -A PREROUTING -d $dstHost -p udp -m multiport --dports $dstPorts -m comment --comment \"Unified Access Control\" -j DROP" >> ${WORKING_DIRECTORY}/.tcp6-exposures-reject
+      done
+
+      echo "[Info] The TCP6 reject rules have been saved in ${WORKING_DIRECTORY}/.tcp6-exposures-reject"
+   fi
+
+   if [ -f ${WORKING_DIRECTORY}/.udp6-exposures ]; then
+
+      overwrite_shell_script_header ${WORKING_DIRECTORY}/.udp6-exposures-reject
+
+      # Convert the list of <HOST_IP>:<EXPOSED_PORT> to <HOST_IP> <EXPOSED_PORT_1>[,<EXPOSED_PORT_1>...] format
+      for i in $(sed 's#^\[\(.*\)\]:\([0-9]*\)$#\1 \2#g' ${WORKING_DIRECTORY}/.udp6-exposures | group_by_1st_column); do
+         
+         local dstHost=$(echo "$i" | awk '{print $1}')
+         local dstPorts=$(echo "$i" | awk '{print $2}')
+
+         echo "ip6tables -t raw -C PREROUTING -d $dstHost -p udp -m multiport --dports $dstPorts -m comment --comment \"Unified Access Control\" -j DROP || \\" >> ${WORKING_DIRECTORY}/.udp6-exposures-reject
+         echo "ip6tables -t raw -A PREROUTING -d $dstHost -p udp -m multiport --dports $dstPorts -m comment --comment \"Unified Access Control\" -j DROP" >> ${WORKING_DIRECTORY}/.udp6-exposures-reject
+      done
+
+      echo "[Info] The UDP6 reject rules have been saved in ${WORKING_DIRECTORY}/.udp6-exposures-reject"
+   fi
 }
 
 # 考虑到有些 高版本的k8s集群，由之前的显示监听变为了“端口隐式监听，用ss/netstat查不到显式的LISTEN状态，但端口能接收流量,不创建 “用户# 态监听进程”，而是通过iptables规则直接将宿主机NodePort的流量转发到 Pod（属于 “隐式监听”）
@@ -2211,6 +2525,7 @@ orderedPara=(
    "--get-packets-capture-script"
    "--run-capture-and-summarize-connections"
    "--concurrently-run-packets-captures"
+   "--preventive-iptables-allow-rules"
    "--usage"
    "--help"
    "--manual"
@@ -2238,6 +2553,7 @@ declare -A mapParaFunc=(
    ["--get-packets-capture-script"]="get_packets_capture_script"
    ["--run-capture-and-summarize-connections"]="run_capture_and_summarize_connections"
    ["--concurrently-run-packets-captures"]="concurrently_run_packets_captures"
+   ["--preventive-iptables-allow-rules"]="preventive_iptables_allow_rules"
    ["--usage"]="usage"
    ["--help"]="usage"
    ["--manual"]="usage"
@@ -2265,6 +2581,7 @@ declare -A mapParaSpec=(
    ["--get-packets-capture-script"]="Generate packet capture scripts and save them in a hidden file."
    ["--run-capture-and-summarize-connections"]="Independently execute a packet capture script and organize the data packet into a connection summary file."
    ["--concurrently-run-packets-captures"]="Read packet capture commands from the packet capture script file and execute each command in the background."
+   ["--preventive-iptables-allow-rules"]="Advance policy deployment of the private network of the current node to avoid connection failure after subsequent security reinforcement."
    ["--usage"]="Simplified operation manual."
    ["--help"]="Simplified operation manual."
    ["--manual"]="Simplified operation manual."
