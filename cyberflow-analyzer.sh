@@ -113,6 +113,11 @@ if [ -z "$(which pip2 2>/dev/null)" ] && [ -z "$(alias pip2 2>/dev/null)" ]; the
    exit -1
 fi
 
+if [ -z "$(which bc 2>/dev/null)" ]; then
+   echo '[Warn] bc is not installed yet.'
+   exit -1
+fi
+
 pip2 show ipaddress -q 2>/dev/null
 if [ $? -ne 0 ]; then
    pip2 install ipaddress-1.0.23-py2.py3-none-any.whl -q 2>/dev/null

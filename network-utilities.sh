@@ -36,6 +36,20 @@ if [ -f ~/.profile ]; then
    source ~/.profile
 fi
 
+#########################################
+# Prerequisites of pip3                 #
+#########################################
+
+pip3 show ipaddress 1>/dev/null 2>/dev/null
+if [ $? -ne 0 ]; then
+   pip3 install ipaddress-1.0.23-py2.py3-none-any.whl
+fi
+
+pip3 show netaddr 1>/dev/null 2>/dev/null
+if [ $? -ne 0 ]; then
+   pip3 install netaddr-1.3.0-py3-none-any.whl
+fi
+
 #
 # [Note] The common storage and management networks in IaaS are usually isolated from the business data network. The following is sample data, please modify it according to the actual situation.
 #
