@@ -486,7 +486,7 @@ abstract_concurrent_process() {
 
    if [ -z "$processorName" ] || [ -z "$filePath" ] || [ ! -f "$filePath" ]; then
       echo '[Warn] You should provide the name of the processing function and the full path of the file to be processed.'
-      exit -1
+      return
    fi
 
    # The default number of records processed by a single process
@@ -538,10 +538,11 @@ writeback_temporary_file() {
 
    if [ ! -f $temporaryFilePath ]; then
       echo "[Warn] The temporary file $temporaryFilePath does not exist."
-      exit -1
+      return
    fi
    
    /usr/bin/mv -f $temporaryFilePath $originalFilePath
+   echo "[Info] Writeback $temporaryFilePath → $originalFilePath"
 }
 
 #########################################
@@ -847,6 +848,129 @@ concurrent_process_dnat_exposures() {
 }
 
 #
+# [Note] Integrate with K8s perspective data to form a deeper analysis of pods.
+#
+recursive_track_k8s_pods() {
+
+   local destination=$1
+   local level=$2
+
+   leve=$(expr $level + 1)
+
+   echo "$destination" | echo sed "s#^#$(printf '%*s' $((level * 3 - 3)) )\`- #g" >> $filePath
+}
+
+#
+# [Note] DNAT exposure perspective view subroutine, recursively tracks the iptables chain to the end pod IP.
+#
+recursive_track_iptables() {
+
+   local linkName=$1
+   local level=$2
+   local filePath=$3
+   local ipFamily=$4
+   local IFS=$'\n'
+   local i=
+
+   if [ -z "$linkName" ] || [ -z "$level" ] || [ -z "$filePath" ]; then
+      echo '[Warn] The current method relies on three input parameters: The link name of nat table, the indentation level and the dump file path.'
+      return
+   fi
+
+   level=$(expr $level + 1)
+   
+   local iptablesBin=
+   if [ -z "$ipFamily" ] || [ "$ipFamily" == "IPv4" ]; then
+      iptablesBin=iptables
+   elif [ "$ipFamily" == "IPv6" ]; then
+      iptablesBin=ip6tables
+   fi
+
+   local portForwards=($($iptablesBin -t nat -S $linkName -w 2>/dev/null | grep -v -w '\-N' | grep -v 'MARK' | sed "s#^#$(printf '%*s' $((level * 3 - 3)) )\`- #g"))
+
+   for i in ${portForwards[@]}; do
+
+      echo "$portForwards" >> $filePath
+
+      local linkName=$(echo "$i" | sed 's#.* -j \([^ ]*\)#\1#')
+
+      if [ "$linkName" == "DNAT" ]; then
+         local destination=$(echo "$line" | sed 's#.* --to-destination \([^ ]*\)#\1#')
+         recursive_track_k8s_pods $destination $level
+         continue
+      else
+         recursive_track_iptables $linkName $level $filePath $ipFamily
+      fi
+   done
+}
+
+#
+# [Note] Show iptables DNAT exposures perspective
+#
+show_dnat_exposures_perspective() {
+
+   local IFS=$'\n'
+   local i=
+   local linkName=
+
+   if [ -f ${WORKING_DIRECTORY}/.tcp4-dnat-exposures ]; then
+      if [ -f ${WORKING_DIRECTORY}/.tcp4-dnat-exposures-perspective ] && [ -s ${WORKING_DIRECTORY}/.tcp4-dnat-exposures-perspective ]; then
+         cat ${WORKING_DIRECTORY}/.tcp4-dnat-exposures-perspective
+      else
+         local j=1
+         for i in $(cat ${WORKING_DIRECTORY}/.tcp4-dnat-exposures); do
+            echo "[$j] $i" | tee -a ${WORKING_DIRECTORY}/.tcp4-dnat-exposures-perspective
+            j=$(expr $j + 1)
+            linkName=$(echo "$i" | awk -F';' '{print $NF}')
+            recursive_track_iptables "$linkName" 0 ${WORKING_DIRECTORY}/.tcp4-dnat-exposures-perspective 'IPv4'
+         done
+      fi
+   fi
+
+   if [ -f ${WORKING_DIRECTORY}/.udp4-dnat-exposures ]; then
+      if [ -f ${WORKING_DIRECTORY}/.udp4-dnat-exposures-perspective ] && [ -s ${WORKING_DIRECTORY}/.udp4-dnat-exposures-perspective ]; then
+         cat ${WORKING_DIRECTORY}/.udp4-dnat-exposures-perspective
+      else
+         local j=1
+         for i in $(cat ${WORKING_DIRECTORY}/.udp4-dnat-exposures); do
+            echo "[$j] $i" | tee -a ${WORKING_DIRECTORY}/.udp4-dnat-exposures-perspective
+            j=$(expr $j + 1)
+            linkName=$(echo "$i" | awk -F';' '{print $NF}')
+            recursive_track_iptables "$linkName" 0 ${WORKING_DIRECTORY}/.udp4-dnat-exposures-perspective 'IPv4'
+         done
+      fi
+   fi
+
+   if [ -f ${WORKING_DIRECTORY}/.tcp6-dnat-exposures ]; then
+      if [ -f ${WORKING_DIRECTORY}/.tcp6-dnat-exposures-perspective ] && [ -s ${WORKING_DIRECTORY}/.tcp6-dnat-exposures-perspective ]; then
+         cat ${WORKING_DIRECTORY}/.tcp6-dnat-exposures-perspective
+      else
+         local j=1
+         for i in $(cat ${WORKING_DIRECTORY}/.tcp6-dnat-exposures); do
+            echo "[$j] $i" | tee -a ${WORKING_DIRECTORY}/.tcp6-dnat-exposures-perspective
+            j=$(expr $j + 1)
+            linkName=$(echo "$i" | awk -F';' '{print $NF}')
+            recursive_track_iptables "$linkName" 0 ${WORKING_DIRECTORY}/.udp4-dnat-exposures-perspective 'IPv6'
+         done
+      fi
+   fi
+
+   if [ -f ${WORKING_DIRECTORY}/.udp6-dnat-exposures ]; then
+      if [ -f ${WORKING_DIRECTORY}/.udp6-dnat-exposures-perspective ] && [ -s ${WORKING_DIRECTORY}/.udp6-dnat-exposures-perspective ]; then
+         cat ${WORKING_DIRECTORY}/.udp6-dnat-exposures-perspective
+      else
+         local j=1
+         for i in $(cat ${WORKING_DIRECTORY}/.udp6-dnat-exposures); do
+            echo "[$j] $i" | tee -a ${WORKING_DIRECTORY}/.udp6-dnat-exposures-perspective
+            j=$(expr $j + 1)
+            linkName=$(echo "$i" | awk -F';' '{print $NF}')
+            recursive_track_iptables "$linkName" 0 ${WORKING_DIRECTORY}/.udp6-dnat-exposures-perspective 'IPv6'
+         done
+      fi
+   fi
+}
+
+#
 # [Note] When there are many listening ports, the performance of sequentially processing port listening exposed surfaces is poor.
 #
 sequential_process_listening_exposures() {
@@ -1031,161 +1155,197 @@ merge_exposures() {
 
    # [1] Generate TCP4 exposures
    # Format TCP4 DNAT exposures: [1] 0.0.0.0/0;<port> → 0.0.0.0:<port> [2] 0.0.0.0:<port1>,<port2> → 0.0.0.0:<port1> and 0.0.0.0:<port2> [3] unique sort
-   local tcp4DnatExposures=($(awk -F';' '{$2 = gensub(/\/0/,"","g",$2); print $2":"$3}' ${WORKING_DIRECTORY}/.tcp4-dnat-exposures | awk -F: '{
-      split($2, ports, ",")
-      for (i in ports) {
-         print $1 ":" ports[i]
-      }
-   }' | sort -u))
+   local tcp4DnatExposures=()
+   if [ -f ${WORKING_DIRECTORY}/.tcp4-dnat-exposures ] && [ -s ${WORKING_DIRECTORY}/.tcp4-dnat-exposures ]; then
+      tcp4DnatExposures=($(awk -F';' '{$2 = gensub(/\/0/,"","g",$2); print $2":"$3}' ${WORKING_DIRECTORY}/.tcp4-dnat-exposures | awk -F: '{
+         split($2, ports, ",")
+         for (i in ports) {
+            print $1 ":" ports[i]
+         }
+      }' | sort -u))
+   fi
 
    # Format TCP4 Listening exposures
-   local tcp4ListeningExposures=($(awk '{print $1}' ${WORKING_DIRECTORY}/.tcp4-listening-exposures | sort -u))
+   local tcp4ListeningExposures=()
+   if [ -f ${WORKING_DIRECTORY}/.tcp4-listening-exposures ] && [ -s ${WORKING_DIRECTORY}/.tcp4-listening-exposures ]; then
+      tcp4ListeningExposures=($(awk '{print $1}' ${WORKING_DIRECTORY}/.tcp4-listening-exposures | sort -u))
+   fi
 
    # Merge TCP4 exposures
    local tcp4Exposures=( ${tcp4DnatExposures[@]} ${tcp4ListeningExposures[@]} )
 
-   # Eliminate duplicates and save to temporary file
-   echo ${tcp4Exposures[@]} | tr ' ' '\n' | sort -u > ${WORKING_DIRECTORY}/.tcp4-exposures.tmp
+   if [ ${#tcp4Exposures[@]} -ne 0 ]; then
 
-   # Convert wildcard exposures 0.0.0.0 to specific exposed addresses ( external IP )
-   awk -F: -v ips="${EXTERNAL_IPV4_ADDRESSES[*]}" '
-      BEGIN {
-         split(ips, ip_array, " ")
-      }
-      {
-         if ($1 == "0.0.0.0") {
-            for (i in ip_array) {
-               print ip_array[i] ":" $2
-            }
-         } else {
-            print $0
+      # Eliminate duplicates and save to temporary file
+      echo ${tcp4Exposures[@]} | tr ' ' '\n' | sort -u > ${WORKING_DIRECTORY}/.tcp4-exposures.tmp
+
+      # Convert wildcard exposures 0.0.0.0 to specific exposed addresses ( external IP )
+      awk -F: -v ips="${EXTERNAL_IPV4_ADDRESSES[*]}" '
+         BEGIN {
+            split(ips, ip_array, " ")
          }
-      }' ${WORKING_DIRECTORY}/.tcp4-exposures.tmp | sort -u > ${WORKING_DIRECTORY}/.tcp4-exposures
-   
-   # Remove temporary file
-   /usr/bin/rm -f ${WORKING_DIRECTORY}/.tcp4-exposures.tmp
+         {
+            if ($1 == "0.0.0.0") {
+               for (i in ip_array) {
+                  print ip_array[i] ":" $2
+               }
+            } else {
+               print $0
+            }
+         }' ${WORKING_DIRECTORY}/.tcp4-exposures.tmp | sort -u > ${WORKING_DIRECTORY}/.tcp4-exposures
+      
+      # Remove temporary file
+      /usr/bin/rm -f ${WORKING_DIRECTORY}/.tcp4-exposures.tmp
 
-   local n_tcp4=$(wc -l ${WORKING_DIRECTORY}/.tcp4-exposures | awk '{print $1}')
-   echo "[Info] $n_tcp4 TCP4 exposures have been saved in ${WORKING_DIRECTORY}/.tcp4-exposures"
+      local n_tcp4=$(wc -l ${WORKING_DIRECTORY}/.tcp4-exposures | awk '{print $1}')
+      echo "[Info] $n_tcp4 TCP4 exposures have been saved in ${WORKING_DIRECTORY}/.tcp4-exposures"
+   fi
 
    # [2] Generate UDP4 exposures
    # Format UDP4 DNAT exposures: [1] 0.0.0.0/0;<port> → 0.0.0.0:<port> [2] 0.0.0.0:<port1>,<port2> → 0.0.0.0:<port1> and 0.0.0.0:<port2> [3] unique sort
-   local udp4DnatExposures=($(awk -F';' '{$2 = gensub(/\/0/,"","g",$2); print $2":"$3}' .udp4-dnat-exposures | awk -F: '{
-      split($2, ports, ",")
-      for (i in ports) {
-         print $1 ":" ports[i]
-      }
-   }' | sort -u))
+   local udp4DnatExposures=()
+   if [ -f ${WORKING_DIRECTORY}/.udp4-dnat-exposures ] && [ -s ${WORKING_DIRECTORY}/.udp4-dnat-exposures ]; then
+      udp4DnatExposures=($(awk -F';' '{$2 = gensub(/\/0/,"","g",$2); print $2":"$3}' ${WORKING_DIRECTORY}/.udp4-dnat-exposures | awk -F: '{
+         split($2, ports, ",")
+         for (i in ports) {
+            print $1 ":" ports[i]
+         }
+      }' | sort -u))
+   fi
 
    # Format UDP4 Listening exposures
-   local udp4ListeningExposures=($(awk '{print $1}' ${WORKING_DIRECTORY}/.udp4-listening-exposures | sort -u))
+   local udp4ListeningExposures=()
+   if [ -f ${WORKING_DIRECTORY}/.udp4-listening-exposures ] && [ -s ${WORKING_DIRECTORY}/.udp4-listening-exposures ]; then
+      udp4ListeningExposures=($(awk '{print $1}' ${WORKING_DIRECTORY}/.udp4-listening-exposures | sort -u))
+   fi
 
    # Merge UDP4 exposures
    local udp4Exposures=( ${udp4DnatExposures[@]} ${udp4ListeningExposures[@]} )
 
-   # Eliminate duplicates and save to temporary file
-   echo ${udp4Exposures[@]} | tr ' ' '\n' | sort -u > .udp4-exposures.tmp
+   if [ ${#udp4Exposures[@]} -ne 0 ]; then
 
-   # Convert wildcard exposures 0.0.0.0 to specific exposed addresses ( external IP )
-   awk -F: -v ips="${EXTERNAL_IPV4_ADDRESSES[*]}" '
-      BEGIN {
-         split(ips, ip_array, " ")
-      }
-      {
-         if ($1 == "0.0.0.0") {
-            for (i in ip_array) {
-               print ip_array[i] ":" $2
-            }
-         } else {
-            print $0
+      # Eliminate duplicates and save to temporary file
+      echo ${udp4Exposures[@]} | tr ' ' '\n' | sort -u > ${WORKING_DIRECTORY}/.udp4-exposures.tmp
+
+      # Convert wildcard exposures 0.0.0.0 to specific exposed addresses ( external IP )
+      awk -F: -v ips="${EXTERNAL_IPV4_ADDRESSES[*]}" '
+         BEGIN {
+            split(ips, ip_array, " ")
          }
-      }' .udp4-exposures.tmp | sort -u > .udp4-exposures
-   
-   # Remove temporary file
-   /usr/bin/rm -f ${WORKING_DIRECTORY}/.udp4-exposures.tmp
+         {
+            if ($1 == "0.0.0.0") {
+               for (i in ip_array) {
+                  print ip_array[i] ":" $2
+               }
+            } else {
+               print $0
+            }
+         }' ${WORKING_DIRECTORY}/.udp4-exposures.tmp | sort -u > ${WORKING_DIRECTORY}/.udp4-exposures
+      
+      # Remove temporary file
+      /usr/bin/rm -f ${WORKING_DIRECTORY}/.udp4-exposures.tmp
 
-   local n_udp4=$(wc -l ${WORKING_DIRECTORY}/.udp4-exposures | awk '{print $1}')
-   echo "[Info] $n_udp4 UDP4 exposures have been saved in ${WORKING_DIRECTORY}/.udp4-exposures"
+      local n_udp4=$(wc -l ${WORKING_DIRECTORY}/.udp4-exposures | awk '{print $1}')
+      echo "[Info] $n_udp4 UDP4 exposures have been saved in ${WORKING_DIRECTORY}/.udp4-exposures"
+   fi
 
    # [3] Generate TCP6 exposures
    # Format TCP6 DNAT exposures:
    # ::/0;<port> → [::]:<port>
    # [::]:<port1>,<port2>,... → [::]:<port1> [::]:<port2> ...
    # unique sort
-   local tcp6DnatExposures=($(awk -F';' '{$2 = gensub(/\/0/,"","g",$2); print "["$2"]:"$3}' .tcp6-dnat-exposures | awk -F']:' '{
-      split($2, ports, ",")
-      for (i in ports) {
-         print $1 "]:" ports[i]
-      }
-   }' | sort -u))
+   local tcp6DnatExposures=()
+   if [ -f ${WORKING_DIRECTORY}/.tcp6-dnat-exposures ] && [ -s ${WORKING_DIRECTORY}/.tcp6-dnat-exposures ]; then
+      tcp6DnatExposures=($(awk -F';' '{$2 = gensub(/\/0/,"","g",$2); print "["$2"]:"$3}' ${WORKING_DIRECTORY}/.tcp6-dnat-exposures | awk -F']:' '{
+         split($2, ports, ",")
+         for (i in ports) {
+            print $1 "]:" ports[i]
+         }
+      }' | sort -u))
+   fi
 
-   # Format TCP4 Listening exposures
-   local tcp6ListeningExposures=($(awk '{print $1}' ${WORKING_DIRECTORY}/.tcp6-listening-exposures | sort -u))
+   # Format TCP6 Listening exposures
+   local tcp6ListeningExposures=()
+   if [ -f ${WORKING_DIRECTORY}/.tcp6-listening-exposures ] && [ -s ${WORKING_DIRECTORY}/.tcp6-listening-exposures ]; then
+      tcp6ListeningExposures=($(awk '{print $1}' ${WORKING_DIRECTORY}/.tcp6-listening-exposures | sort -u))
+   fi
 
-   # Merge TCP4 exposures
+   # Merge TCP6 exposures
    local tcp6Exposures=( ${tcp6DnatExposures[@]} ${tcp6ListeningExposures[@]} )
 
-   # Eliminate duplicates and save to temporary file
-   echo ${tcp6Exposures[@]} | tr ' ' '\n' | sort -u > .tcp6-exposures.tmp
+   if [ ${#tcp6Exposures[@]} -ne 0 ]; then
 
-   # Convert wildcard exposures [::] to specific exposed addresses ( external IP )
-   awk -F']:' -v ips="${EXTERNAL_IPV6_ADDRESSES[*]}" '
-      BEGIN {
-         split(ips, ip_array, " ")
-      }
-      {
-         if ($1 == "[::") {
-            for (i in ip_array) {
-               print "[" ip_array[i] "]:" $2
-            }
-         } else {
-            print $0
+      # Eliminate duplicates and save to temporary file
+      echo ${tcp6Exposures[@]} | tr ' ' '\n' | sort -u > ${WORKING_DIRECTORY}/.tcp6-exposures.tmp
+
+      # Convert wildcard exposures [::] to specific exposed addresses ( external IP )
+      awk -F']:' -v ips="${EXTERNAL_IPV6_ADDRESSES[*]}" '
+         BEGIN {
+            split(ips, ip_array, " ")
          }
-      }' .tcp6-exposures.tmp | sort -u > .tcp6-exposures
-   
-   # Remove temporary file
-   /usr/bin/rm -f ${WORKING_DIRECTORY}/.tcp6-exposures.tmp
+         {
+            if ($1 == "[::") {
+               for (i in ip_array) {
+                  print "[" ip_array[i] "]:" $2
+               }
+            } else {
+               print $0
+            }
+         }' ${WORKING_DIRECTORY}/.tcp6-exposures.tmp | sort -u > ${WORKING_DIRECTORY}/.tcp6-exposures
+      
+      # Remove temporary file
+      /usr/bin/rm -f ${WORKING_DIRECTORY}/.tcp6-exposures.tmp
 
-   local n_tcp6=$(wc -l ${WORKING_DIRECTORY}/.tcp6-exposures | awk '{print $1}')
-   echo "[Info] $n_tcp6 TCP6 exposures have been saved in ${WORKING_DIRECTORY}/.tcp6-exposures"
+      local n_tcp6=$(wc -l ${WORKING_DIRECTORY}/.tcp6-exposures | awk '{print $1}')
+      echo "[Info] $n_tcp6 TCP6 exposures have been saved in ${WORKING_DIRECTORY}/.tcp6-exposures"
+   fi
 
    # [4] Generate UDP6 exposures
-   local udp6DnatExposures=($(awk -F';' '{$2 = gensub(/\/0/,"","g",$2); print "["$2"]:"$3}' .udp6-dnat-exposures | awk -F']:' '{
-      split($2, ports, ",")
-      for (i in ports) {
-         print $1 "]:" ports[i]
-      }
-   }' | sort -u))
+   local udp6DnatExposures=()
+   if [ -f ${WORKING_DIRECTORY}/.udp6-dnat-exposures ] && [ -s ${WORKING_DIRECTORY}/.udp6-dnat-exposures ]; then
+      udp6DnatExposures=($(awk -F';' '{$2 = gensub(/\/0/,"","g",$2); print "["$2"]:"$3}' ${WORKING_DIRECTORY}/.udp6-dnat-exposures | awk -F']:' '{
+         split($2, ports, ",")
+         for (i in ports) {
+            print $1 "]:" ports[i]
+         }
+      }' | sort -u))
+   fi
 
    # Format UDP6 Listening exposures
-   local udp6ListeningExposures=($(awk '{print $1}' ${WORKING_DIRECTORY}/.udp6-listening-exposures | sort -u))
+   local udp6ListeningExposures=()
+   if [ -f ${WORKING_DIRECTORY}/.udp6-listening-exposures ] && [ -s ${WORKING_DIRECTORY}/.udp6-listening-exposures ]; then
+      udp6ListeningExposures=($(awk '{print $1}' ${WORKING_DIRECTORY}/.udp6-listening-exposures | sort -u))
+   fi
 
    # Merge UDP6 exposures
    local udp6Exposures=( ${udp6DnatExposures[@]} ${udp6ListeningExposures[@]} )
 
-   # Eliminate duplicates and save to temporary file
-   echo ${udp6Exposures[@]} | tr ' ' '\n' | sort -u > .udp6-exposures.tmp
+   if [ ${#udp6Exposures[@]} -ne 0 ]; then
 
-   # Convert wildcard exposures [::] to specific exposed addresses ( external IP )
-   awk -F']:' -v ips="${EXTERNAL_IPV6_ADDRESSES[*]}" '
-      BEGIN {
-         split(ips, ip_array, " ")
-      }
-      {
-         if ($1 == "[::") {
-            for (i in ip_array) {
-               print "[" ip_array[i] "]:" $2
-            }
-         } else {
-            print $0
+      # Eliminate duplicates and save to temporary file
+      echo ${udp6Exposures[@]} | tr ' ' '\n' | sort -u > ${WORKING_DIRECTORY}/.udp6-exposures.tmp
+
+      # Convert wildcard exposures [::] to specific exposed addresses ( external IP )
+      awk -F']:' -v ips="${EXTERNAL_IPV6_ADDRESSES[*]}" '
+         BEGIN {
+            split(ips, ip_array, " ")
          }
-      }' .udp6-exposures.tmp | sort -u > .udp6-exposures
-   
-   # Remove temporary file
-   /usr/bin/rm -f ${WORKING_DIRECTORY}/.udp6-exposures.tmp
+         {
+            if ($1 == "[::") {
+               for (i in ip_array) {
+                  print "[" ip_array[i] "]:" $2
+               }
+            } else {
+               print $0
+            }
+         }' ${WORKING_DIRECTORY}/.udp6-exposures.tmp | sort -u > ${WORKING_DIRECTORY}/.udp6-exposures
+      
+      # Remove temporary file
+      /usr/bin/rm -f ${WORKING_DIRECTORY}/.udp6-exposures.tmp
 
-   local n_udp6=$(wc -l ${WORKING_DIRECTORY}/.udp6-exposures | awk '{print $1}')
-   echo "[Info] $n_udp6 UDP6 exposures have been saved in ${WORKING_DIRECTORY}/.udp6-exposures"
+      local n_udp6=$(wc -l ${WORKING_DIRECTORY}/.udp6-exposures | awk '{print $1}')
+      echo "[Info] $n_udp6 UDP6 exposures have been saved in ${WORKING_DIRECTORY}/.udp6-exposures"
+   fi
 }
 
 #
@@ -1245,68 +1405,80 @@ get_packets_filter_file_by_exposures () {
    load_vmware_subnet_addresses_from_file
 
    # [1] TCP4 filters
-   echo '[Info] TCP4 filters:'
+   if [ -f ${WORKING_DIRECTORY}/.tcp4-exposures ] && [ -s ${WORKING_DIRECTORY}/.tcp4-exposures ]; then
 
-   # Add IP address family filtering criteria and TCP/UDP protocol type filtering criteria
-   echo -n 'ip and tcp' | tee ${WORKING_DIRECTORY}/.tcp4-exposures-packets-filter
+      echo '[Info] TCP4 filters:'
 
-   # Filter out request packets from private subnets
-   for srcNet in ${DOCKER_NETWORK_SUBNETS_IPV4[@]} ${CLUSTER_CIDR_IPV4[@]} ${KVM_SUBNET_ADDRESSES_IPV4[@]} ${VMWARE_SUBNET_ADDRESSES_IPV4[@]}; do
-      echo -n " and not src net $srcNet" | tee -a ${WORKING_DIRECTORY}/.tcp4-exposures-packets-filter
-   done
+      # Add IP address family filtering criteria and TCP/UDP protocol type filtering criteria
+      echo -n 'ip and tcp' | tee ${WORKING_DIRECTORY}/.tcp4-exposures-packets-filter
 
-   # Add destination address filtering criteria
-   echo -n ' and ( ' | tee -a .tcp4-exposures-packets-filter
-   awk -F: '{a[$1]=a[$1]?a[$1]" or dst port "$2:$2} END{for(i in a) print "dst host "i" and ( dst port "a[i]" ) or"}' .tcp4-exposures | tr '\n' ' ' | sed 's# or $##g' | tee -a ${WORKING_DIRECTORY}/.tcp4-exposures-packets-filter
-   echo -n ' )' | tee -a ${WORKING_DIRECTORY}/.tcp4-exposures-packets-filter
+      # Filter out request packets from private subnets
+      for srcNet in ${DOCKER_NETWORK_SUBNETS_IPV4[@]} ${CLUSTER_CIDR_IPV4[@]} ${KVM_SUBNET_ADDRESSES_IPV4[@]} ${VMWARE_SUBNET_ADDRESSES_IPV4[@]}; do
+         echo -n " and not src net $srcNet" | tee -a ${WORKING_DIRECTORY}/.tcp4-exposures-packets-filter
+      done
+
+      # Add destination address filtering criteria
+      echo -n ' and ( ' | tee -a .tcp4-exposures-packets-filter
+      awk -F: '{a[$1]=a[$1]?a[$1]" or dst port "$2:$2} END{for(i in a) print "dst host "i" and ( dst port "a[i]" ) or"}' ${WORKING_DIRECTORY}/.tcp4-exposures | tr '\n' ' ' | sed 's# or $##g' | tee -a ${WORKING_DIRECTORY}/.tcp4-exposures-packets-filter
+      echo -n ' )' | tee -a ${WORKING_DIRECTORY}/.tcp4-exposures-packets-filter
+   fi
 
    # [2] UDP4 filters
-   echo -e '\n[Info] UDP4 filters:'
+   if [ -f ${WORKING_DIRECTORY}/.udp4-exposures ] && [ -s ${WORKING_DIRECTORY}/.udp4-exposures ]; then
 
-   # Add IP address family filtering criteria and TCP/UDP protocol type filtering criteria
-   echo -n 'ip and udp' | tee ${WORKING_DIRECTORY}/.udp4-exposures-packets-filter
+      echo -e '\n[Info] UDP4 filters:'
 
-   # Filter out request packets from private subnets
-   for srcNet in ${DOCKER_NETWORK_SUBNETS_IPV4[@]} ${CLUSTER_CIDR_IPV4[@]} ${KVM_SUBNET_ADDRESSES_IPV4[@]} ${VMWARE_SUBNET_ADDRESSES_IPV4[@]}; do
-      echo -n " and not src net $srcNet" | tee -a ${WORKING_DIRECTORY}/.udp4-exposures-packets-filter
-   done
+      # Add IP address family filtering criteria and TCP/UDP protocol type filtering criteria
+      echo -n 'ip and udp' | tee ${WORKING_DIRECTORY}/.udp4-exposures-packets-filter
 
-   # Add destination address filtering criteria
-   echo -n ' and ( ' | tee -a ${WORKING_DIRECTORY}/.udp4-exposures-packets-filter
-   awk -F: '{a[$1]=a[$1]?a[$1]" or dst port "$2:$2} END{for(i in a) print "dst host "i" and ( dst port "a[i]" ) or"}' .udp4-exposures | tr '\n' ' ' | sed 's# or $##g' | tee -a ${WORKING_DIRECTORY}/.udp4-exposures-packets-filter
-   echo -n ' )' | tee -a ${WORKING_DIRECTORY}/.udp4-exposures-packets-filter
+      # Filter out request packets from private subnets
+      for srcNet in ${DOCKER_NETWORK_SUBNETS_IPV4[@]} ${CLUSTER_CIDR_IPV4[@]} ${KVM_SUBNET_ADDRESSES_IPV4[@]} ${VMWARE_SUBNET_ADDRESSES_IPV4[@]}; do
+         echo -n " and not src net $srcNet" | tee -a ${WORKING_DIRECTORY}/.udp4-exposures-packets-filter
+      done
+
+      # Add destination address filtering criteria
+      echo -n ' and ( ' | tee -a ${WORKING_DIRECTORY}/.udp4-exposures-packets-filter
+      awk -F: '{a[$1]=a[$1]?a[$1]" or dst port "$2:$2} END{for(i in a) print "dst host "i" and ( dst port "a[i]" ) or"}' ${WORKING_DIRECTORY}/.udp4-exposures | tr '\n' ' ' | sed 's# or $##g' | tee -a ${WORKING_DIRECTORY}/.udp4-exposures-packets-filter
+      echo -n ' )' | tee -a ${WORKING_DIRECTORY}/.udp4-exposures-packets-filter
+   fi
 
    # [3] TCP6 filters
-   echo -e '\n[Info] TCP6 filters:'
-   
-   # Add IP address family filtering criteria and TCP/UDP protocol type filtering criteria
-   echo -n 'ip6 and tcp' | tee ${WORKING_DIRECTORY}/.tcp6-exposures-packets-filter
+   if [ -f ${WORKING_DIRECTORY}/.tcp6-exposures ] && [ -s ${WORKING_DIRECTORY}/.tcp6-exposures ]; then
 
-   # Filter out request packets from private subnets
-   for srcNet in ${DOCKER_NETWORK_SUBNETS_IPV6[@]} ${CLUSTER_CIDR_IPV6[@]} ${KVM_SUBNET_ADDRESSES_IPV6[@]} ${VMWARE_SUBNET_ADDRESSES_IPV6[@]}; do
-      echo -n " and not src net $srcNet" | tee -a ${WORKING_DIRECTORY}/.tcp6-exposures-packets-filter
-   done
+      echo -e '\n[Info] TCP6 filters:'
+      
+      # Add IP address family filtering criteria and TCP/UDP protocol type filtering criteria
+      echo -n 'ip6 and tcp' | tee ${WORKING_DIRECTORY}/.tcp6-exposures-packets-filter
 
-   # Add destination address filtering criteria
-   echo -n ' and ( ' | tee -a .tcp6-exposures-packets-filter
-   awk -F']:' '{addr = $1; port = $2; gsub(/^\[/, "", addr); a[addr]=a[addr]?a[addr]" or dst port "port:port} END{for(i in a) print "dst host "i" and ( dst port "a[i]" ) or"}' .tcp6-exposures | tr '\n' ' ' | sed 's# or $##g' | tee -a ${WORKING_DIRECTORY}/.tcp6-exposures-packets-filter
-   echo -n ' )' | tee -a ${WORKING_DIRECTORY}/.tcp6-exposures-packets-filter
+      # Filter out request packets from private subnets
+      for srcNet in ${DOCKER_NETWORK_SUBNETS_IPV6[@]} ${CLUSTER_CIDR_IPV6[@]} ${KVM_SUBNET_ADDRESSES_IPV6[@]} ${VMWARE_SUBNET_ADDRESSES_IPV6[@]}; do
+         echo -n " and not src net $srcNet" | tee -a ${WORKING_DIRECTORY}/.tcp6-exposures-packets-filter
+      done
+
+      # Add destination address filtering criteria
+      echo -n ' and ( ' | tee -a .tcp6-exposures-packets-filter
+      awk -F']:' '{addr = $1; port = $2; gsub(/^\[/, "", addr); a[addr]=a[addr]?a[addr]" or dst port "port:port} END{for(i in a) print "dst host "i" and ( dst port "a[i]" ) or"}' ${WORKING_DIRECTORY}/.tcp6-exposures | tr '\n' ' ' | sed 's# or $##g' | tee -a ${WORKING_DIRECTORY}/.tcp6-exposures-packets-filter
+      echo -n ' )' | tee -a ${WORKING_DIRECTORY}/.tcp6-exposures-packets-filter
+   fi
 
    # [4] UDP6 filters
-   echo -e '\n[Info] UDP6 filters:'
+   if [ -f ${WORKING_DIRECTORY}/.udp6-exposures ] && [ -s ${WORKING_DIRECTORY}/.udp6-exposures ]; then
 
-   # Add IP address family filtering criteria and TCP/UDP protocol type filtering criteria
-   echo -n 'ip6 and udp' | tee ${WORKING_DIRECTORY}/.udp6-exposures-packets-filter
+      echo -e '\n[Info] UDP6 filters:'
 
-   # Filter out request packets from private subnets
-   for srcNet in ${DOCKER_NETWORK_SUBNETS_IPV6[@]} ${CLUSTER_CIDR_IPV6[@]} ${KVM_SUBNET_ADDRESSES_IPV6[@]} ${VMWARE_SUBNET_ADDRESSES_IPV6[@]}; do
-      echo -n " and not src net $srcNet" | tee -a ${WORKING_DIRECTORY}/.udp6-exposures-packets-filter
-   done
+      # Add IP address family filtering criteria and TCP/UDP protocol type filtering criteria
+      echo -n 'ip6 and udp' | tee ${WORKING_DIRECTORY}/.udp6-exposures-packets-filter
 
-   # Add destination address filtering criteria
-   echo -n ' and ( ' | tee -a .udp6-exposures-packets-filter
-   awk -F']:' '{addr = $1; port = $2; gsub(/^\[/, "", addr); a[addr]=a[addr]?a[addr]" or dst port "port:port} END{for(i in a) print "dst host "i" and ( dst port "a[i]" ) or"}' .udp6-exposures | tr '\n' ' ' | sed 's# or $##g' | tee -a ${WORKING_DIRECTORY}/.udp6-exposures-packets-filter
-   echo -n ' )' | tee -a ${WORKING_DIRECTORY}/.udp6-exposures-packets-filter
+      # Filter out request packets from private subnets
+      for srcNet in ${DOCKER_NETWORK_SUBNETS_IPV6[@]} ${CLUSTER_CIDR_IPV6[@]} ${KVM_SUBNET_ADDRESSES_IPV6[@]} ${VMWARE_SUBNET_ADDRESSES_IPV6[@]}; do
+         echo -n " and not src net $srcNet" | tee -a ${WORKING_DIRECTORY}/.udp6-exposures-packets-filter
+      done
+
+      # Add destination address filtering criteria
+      echo -n ' and ( ' | tee -a .udp6-exposures-packets-filter
+      awk -F']:' '{addr = $1; port = $2; gsub(/^\[/, "", addr); a[addr]=a[addr]?a[addr]" or dst port "port:port} END{for(i in a) print "dst host "i" and ( dst port "a[i]" ) or"}' ${WORKING_DIRECTORY}/.udp6-exposures | tr '\n' ' ' | sed 's# or $##g' | tee -a ${WORKING_DIRECTORY}/.udp6-exposures-packets-filter
+      echo -n ' )' | tee -a ${WORKING_DIRECTORY}/.udp6-exposures-packets-filter
+   fi
 }
 
 #
@@ -1321,13 +1493,21 @@ get_packets_capture_script() {
    local i=
    for i in ${EXTERNAL_INTERFACES[@]}; do
 
-      echo "timeout ${PACKETS_CAPTURE_DURATION} tcpdump -i $i -lqnn -F ${WORKING_DIRECTORY}/.tcp4-exposures-packets-filter" | tee -a ${WORKING_DIRECTORY}/.packets-capture-scripts
+      if [ -f ${WORKING_DIRECTORY}/.tcp4-exposures-packets-filter ]; then
+         echo "timeout ${PACKETS_CAPTURE_DURATION} tcpdump -i $i -lqnn -F ${WORKING_DIRECTORY}/.tcp4-exposures-packets-filter" | tee -a ${WORKING_DIRECTORY}/.packets-capture-scripts
+      fi
 
-      echo "timeout ${PACKETS_CAPTURE_DURATION} tcpdump -i $i -lqnn -F ${WORKING_DIRECTORY}/.udp4-exposures-packets-filter" | tee -a ${WORKING_DIRECTORY}/.packets-capture-scripts
+      if [ -f ${WORKING_DIRECTORY}/.udp4-exposures-packets-filter ]; then
+         echo "timeout ${PACKETS_CAPTURE_DURATION} tcpdump -i $i -lqnn -F ${WORKING_DIRECTORY}/.udp4-exposures-packets-filter" | tee -a ${WORKING_DIRECTORY}/.packets-capture-scripts
+      fi
 
-      echo "timeout ${PACKETS_CAPTURE_DURATION} tcpdump -i $i -lqnn -F ${WORKING_DIRECTORY}/.tcp6-exposures-packets-filter" | tee -a ${WORKING_DIRECTORY}/.packets-capture-scripts
+      if [ -f ${WORKING_DIRECTORY}/.tcp6-exposures-packets-filter ]; then
+         echo "timeout ${PACKETS_CAPTURE_DURATION} tcpdump -i $i -lqnn -F ${WORKING_DIRECTORY}/.tcp6-exposures-packets-filter" | tee -a ${WORKING_DIRECTORY}/.packets-capture-scripts
+      fi
 
-      echo "timeout ${PACKETS_CAPTURE_DURATION} tcpdump -i $i -lqnn -F ${WORKING_DIRECTORY}/.udp6-exposures-packets-filter" | tee -a ${WORKING_DIRECTORY}/.packets-capture-scripts
+      if [ -f ${WORKING_DIRECTORY}/.udp6-exposures-packets-filter ]; then
+         echo "timeout ${PACKETS_CAPTURE_DURATION} tcpdump -i $i -lqnn -F ${WORKING_DIRECTORY}/.udp6-exposures-packets-filter" | tee -a ${WORKING_DIRECTORY}/.packets-capture-scripts
+      fi
    done
 
    echo "[Info] Packets capture scripts have saved in ${WORKING_DIRECTORY}/.packets-capture-scripts"
@@ -1778,6 +1958,7 @@ get_iptables_reject_rules_from_exposures() {
 orderedPara=(
    "--dump-dnat-strategy-tables"
    "--concurrent-process-dnat-exposures"
+   "--show-dnat-exposures-perspective"
    "--dump-listening-tables"
    "--sequential-process-listening-exposures"
    "--concurrent-process-listening-exposures"
@@ -1800,6 +1981,7 @@ orderedPara=(
 declare -A mapParaFunc=(
    ["--dump-dnat-strategy-tables"]="dump_dnat_strategy_tables"
    ["--concurrent-process-dnat-exposures"]="concurrent_process_dnat_exposures"
+   ["--show-dnat-exposures-perspective"]="show_dnat_exposures_perspective"
    ["--dump-listening-tables"]="dump_listening_tables"
    ["--sequential-process-listening-exposures"]="sequential_process_listening_exposures"
    ["--concurrent-process-listening-exposures"]="concurrent_process_listening_exposures"
@@ -1822,10 +2004,11 @@ declare -A mapParaFunc=(
 declare -A mapParaSpec=(
    ["--dump-dnat-strategy-tables"]="Query iptables DNAT strategies and save them in hidden files."
    ["--concurrent-process-dnat-exposures"]="Concurrently process iptables DNAT strategites and save them in original hidden files."
+   ["--show-dnat-exposures-perspective"]="Tracking the exposed forwarding surface of iptables NAT through linked lists."
    ["--dump-listening-tables"]="Retrieve the port listening list and export it to hidden files. These hidden files are distinguished by IP address family and TCP/UDP protocols."
    ["--sequential-process-listening-exposures"]="Process the port listening list sequentially in a separate process, filtering out non exposed listening surfaces."
    ["--concurrent-process-listening-exposures"]="Multi process concurrent processing port listening list, filtering out non exposed surface listening."
-   ["--merge-exposures"]="merge_exposures"
+   ["--merge-exposures"]="Merge the exposed surfaces of iptables DNAT and port listening into a unified exposed surface"
    ["--get-packets-filter-file-by-exposures"]="Generate packet capture filter files based on address family and protocol type."
    ["--get-packets-capture-script"]="Generate packet capture scripts and save them in a hidden file."
    ["--run-capture-and-summarize-connections"]="Independently execute a packet capture script and organize the data packet into a connection summary file."
