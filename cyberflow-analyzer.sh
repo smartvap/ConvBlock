@@ -11,6 +11,8 @@
 #  [2] Fully compatible with TCP/UDP protocol and IPv4/6 dual stack
 #  [3] Unify the iptables port forwarding strategies and port listenings as exposures
 #  [4] Analyze the exposed surface first, and then capture packets, that is, carry out targeted traffic capture. More accurate inbound strategy analysis.
+#  [5] In this release, the tshark mode has been deprecated, and tcpdump has been reinstated as the replacement. Although tshark can provide richer analysis of packet content (such as supporting JSON format output), its capability to directly decode data has significantly diminished in practical scenarios. Currently, most traffic is encrypted using SSL, rendering tshark ineffective for parsing. Furthermore, tshark has notable limitations in handling complex, lengthy filters; its performance severely degrades and may even fail entirely when the number of filtering conditions increases.
+#  [6] In this version, due to the introduction of iptables exposed surface acquisition, K8s API permissions and kubectl are no longer mandatory, which leads to differences in processing methods between master and worker nodes in the K8s cluster, indirectly increasing the complexity of the design.
 
 #########################################
 # Bugs, Defects and Other Problems      #
@@ -21,17 +23,22 @@
 # [3] When the container on the current node accesses open services on the current node, due to the dynamic nature of the container IP, the address segments of the container network, such as the bip address segment and all address segments under the Docker network, such as the kube apiserver service port, should be released. This function is not universal, therefore it is not included as a regular function.
 # [4] The intercepted request can be correctly identified and the connection failure caused by security protection can be found in time.
 # [5] Iptables automatically takes effect after the host is restarted.
-# [6] Add manually backup functions
-# [7] udp is not properly handled!
-# [8] multiport optimize
-# [9] The local link addresses 127.0.0.0/8 and fe80::/10 are both loopback address networks, and traffic passing through these addresses should be filtered
+# [6] Add manually backup functions.
+# [7] udp is not properly handled! [Done]
+# [8] multiport optimize [Done]
+# [9] The local link addresses 127.0.0.0/8 and fe80::/10 are both loopback address networks, and traffic passing through these addresses should be filtered. [Done]
 # [10] Interpretability of IP quintuple data;
 # [11] iptables -t raw -I PREROUTING -p tcp -s 2001:db8:abc1::/64 -j ACCEPT # Standalone docker policies 
-# [12] The blocking of IPv6 addresses requires the use of the ip6tables command.
-# [13] The function of automatically revoking blockage within 5 minutes;
-# [14] Add comment to all generated strategies.
-# [15] netstat -anltp needs to be replaced with ss -nltp to improve the query efficiency and accuracy of the listening ports
-# [16] External IP is based on existing generation logic, with nodeport port listening and nodeport iptables (newer k8s version)
+# [12] The blocking of IPv6 addresses requires the use of the ip6tables command. [Done]
+# [13] The function of automatically revoking blockage within 5 minutes.
+# [14] Add comment to all generated strategies. [Done]
+# [15] netstat -anltp needs to be replaced with ss -nltp to improve the query efficiency and accuracy of the listening ports. [Done]
+# [16] External IP is based on existing generation logic, with nodeport port listening and nodeport iptables (newer k8s version). [Done]
+# [17] Outbound packet capture and summarization.
+# [18] Auxiliary strategy verification function.
+# [19] Generation of switch deployment strategy.
+# [20] Integrate CMDB strategy translation.
+# [21] 
 
 #########################################
 # Verifications                         #
@@ -338,6 +345,9 @@ load_k8s_nodes_ip_addresses_from_file() {
    K8S_NODES_IP_ADDRESSES=($(cat ${WORKING_DIRECTORY}/.k8s-nodes 2>/dev/null))
    K8S_NODES_IPV4_ADDRESSES=($(cat ${WORKING_DIRECTORY}/.k8s-nodes-ipv4 2>/dev/null))
    K8S_NODES_IPV6_ADDRESSES=($(cat ${WORKING_DIRECTORY}/.k8s-nodes-ipv6 2>/dev/null))
+   K8S_NODES_SUBNETS=($(cat ${WORKING_DIRECTORY}/.k8s-nodes-subnets 2>/dev/null))
+   K8S_NODES_IPV4_SUBNETS=($(cat ${WORKING_DIRECTORY}/.k8s-nodes-ipv4-subnets 2>/dev/null))
+   K8S_NODES_IPV6_SUBNETS=($(cat ${WORKING_DIRECTORY}/.k8s-nodes-ipv6-subnets 2>/dev/null))
 }
 
 #########################################
@@ -1403,6 +1413,7 @@ get_packets_filter_file_by_exposures () {
    load_cluster_cidr_from_file
    load_kvm_subnet_addresses_from_file
    load_vmware_subnet_addresses_from_file
+   load_k8s_nodes_ip_addresses_from_file
 
    # [1] TCP4 filters
    if [ -f ${WORKING_DIRECTORY}/.tcp4-exposures ] && [ -s ${WORKING_DIRECTORY}/.tcp4-exposures ]; then
@@ -1413,7 +1424,7 @@ get_packets_filter_file_by_exposures () {
       echo -n 'ip and tcp' | tee ${WORKING_DIRECTORY}/.tcp4-exposures-packets-filter
 
       # Filter out request packets from private subnets
-      for srcNet in ${DOCKER_NETWORK_SUBNETS_IPV4[@]} ${CLUSTER_CIDR_IPV4[@]} ${KVM_SUBNET_ADDRESSES_IPV4[@]} ${VMWARE_SUBNET_ADDRESSES_IPV4[@]}; do
+      for srcNet in ${DOCKER_NETWORK_SUBNETS_IPV4[@]} ${CLUSTER_CIDR_IPV4[@]} ${KVM_SUBNET_ADDRESSES_IPV4[@]} ${VMWARE_SUBNET_ADDRESSES_IPV4[@]} ${K8S_NODES_IPV4_SUBNETS[@]}; do
          echo -n " and not src net $srcNet" | tee -a ${WORKING_DIRECTORY}/.tcp4-exposures-packets-filter
       done
 
@@ -1432,7 +1443,7 @@ get_packets_filter_file_by_exposures () {
       echo -n 'ip and udp' | tee ${WORKING_DIRECTORY}/.udp4-exposures-packets-filter
 
       # Filter out request packets from private subnets
-      for srcNet in ${DOCKER_NETWORK_SUBNETS_IPV4[@]} ${CLUSTER_CIDR_IPV4[@]} ${KVM_SUBNET_ADDRESSES_IPV4[@]} ${VMWARE_SUBNET_ADDRESSES_IPV4[@]}; do
+      for srcNet in ${DOCKER_NETWORK_SUBNETS_IPV4[@]} ${CLUSTER_CIDR_IPV4[@]} ${KVM_SUBNET_ADDRESSES_IPV4[@]} ${VMWARE_SUBNET_ADDRESSES_IPV4[@]} ${K8S_NODES_IPV4_SUBNETS[@]}; do
          echo -n " and not src net $srcNet" | tee -a ${WORKING_DIRECTORY}/.udp4-exposures-packets-filter
       done
 
@@ -1451,7 +1462,7 @@ get_packets_filter_file_by_exposures () {
       echo -n 'ip6 and tcp' | tee ${WORKING_DIRECTORY}/.tcp6-exposures-packets-filter
 
       # Filter out request packets from private subnets
-      for srcNet in ${DOCKER_NETWORK_SUBNETS_IPV6[@]} ${CLUSTER_CIDR_IPV6[@]} ${KVM_SUBNET_ADDRESSES_IPV6[@]} ${VMWARE_SUBNET_ADDRESSES_IPV6[@]}; do
+      for srcNet in ${DOCKER_NETWORK_SUBNETS_IPV6[@]} ${CLUSTER_CIDR_IPV6[@]} ${KVM_SUBNET_ADDRESSES_IPV6[@]} ${VMWARE_SUBNET_ADDRESSES_IPV6[@]} ${K8S_NODES_IPV6_SUBNETS[@]}; do
          echo -n " and not src net $srcNet" | tee -a ${WORKING_DIRECTORY}/.tcp6-exposures-packets-filter
       done
 
@@ -1470,7 +1481,7 @@ get_packets_filter_file_by_exposures () {
       echo -n 'ip6 and udp' | tee ${WORKING_DIRECTORY}/.udp6-exposures-packets-filter
 
       # Filter out request packets from private subnets
-      for srcNet in ${DOCKER_NETWORK_SUBNETS_IPV6[@]} ${CLUSTER_CIDR_IPV6[@]} ${KVM_SUBNET_ADDRESSES_IPV6[@]} ${VMWARE_SUBNET_ADDRESSES_IPV6[@]}; do
+      for srcNet in ${DOCKER_NETWORK_SUBNETS_IPV6[@]} ${CLUSTER_CIDR_IPV6[@]} ${KVM_SUBNET_ADDRESSES_IPV6[@]} ${VMWARE_SUBNET_ADDRESSES_IPV6[@]}  ${K8S_NODES_IPV6_SUBNETS[@]}; do
          echo -n " and not src net $srcNet" | tee -a ${WORKING_DIRECTORY}/.udp6-exposures-packets-filter
       done
 
@@ -1955,6 +1966,248 @@ get_iptables_reject_rules_from_exposures() {
    fi
 }
 
+#
+# To be verified
+#
+run_outbound_capture_and_summarize_connections() {
+
+   local connectionSummaryPath="$1"
+   local tcpdumpScript="${@:2}"
+
+   if [ -z "$connectionSummaryPath" ] || [ -z "$tcpdumpScript" ]; then
+      echo '[Info] Please provide a valid packet capture script.'
+      exit -1
+   fi
+
+   >$connectionSummaryPath
+
+   eval "$tcpdumpScript" 2>/dev/null | while IFS= read -r line; do
+      
+      local packet=
+      local dstHost=
+      local dstPort=
+
+      if [ $(echo "$line" | grep -i -w 'IP' | wc -l) -ne 0 ]; then
+         # IPv4 Packets
+         packet=$(echo "$line" | awk '{print $3,$5}' | sed 's#^\([0-9.]*\)\.[0-9]*\ \([0-9.]*\)\.\([0-9]*\).*#\1,\2.\3#g')
+      elif [ $(echo "$line" | grep -i -w 'IP6' | wc -l) -ne 0 ]; then
+         # IPv6 Packets
+         # "10:11:20.174380 IP6 2001:db8::1.10884 > 2001:db8::2.10250: tcp 0" → "2001:db8::1,2001:db8::2.10250"
+         packet=$(echo "$line" | awk '{print $3,$5}' | sed 's#^\([^.]*\)\.[0-9]*\ \([^.]*\)\.\([0-9]*\).*#\1,\2.\3#g')
+      fi
+
+      if [ $(echo "$packet" | grep "^$" | wc -l) -ne 0 ]; then
+         # Check Empty lines
+         continue
+      fi
+
+      # Add parameter FX to avoid partial content matching
+      if [ $(grep -Fx $packet $connectionSummaryPath | wc -l) -eq 0 ]; then
+         echo $packet >> $connectionSummaryPath
+      fi
+   done
+
+   echo "[Info] The packets have been summarized into file $connectionSummaryPath"
+}
+
+#
+# [Note] Capture outbound TCP/UDP packets
+#
+concurrently_run_outbound_captures() {
+
+   load_external_interfaces_from_file
+   load_external_ip_addresses_from_file
+   load_docker_subnet_addresses_from_file
+   load_cluster_cidr_from_file
+   load_service_cidr_from_file
+   load_kvm_subnet_addresses_from_file
+   load_vmware_subnet_addresses_from_file
+   load_k8s_nodes_ip_addresses_from_file
+
+   if [ ${#EXTERNAL_IPV4_ADDRESSES[@]} -ne 0 ]; then
+
+      # Source filtering conditions. The filtering conditions at the source should try to avoid listening ports as much as possible, otherwise it will cause the session direction to be reversed, resulting in the capture of inbound traffic. Of course, there may also be occasional situations where the listening port is allocated as the source port. In cases where the number of listening ports is large, some outbound traffic may be lost. However, as it is traffic collection, the lost traffic in cases where the collection time is long will not affect the final result unless it is explicitly designated that the listening port is used as the source port. Our principle is to discard 1000 correct ones rather than include one incorrect one.
+      local srcTcp4Filter=
+      local srcUdp4Filter=
+
+      if [ ! -f ${WORKING_DIRECTORY}/.tcp4-exposures ]; then
+         echo "[Warn] As tcpdump cannot determine the initiator and receiver of a session in a packet, it is strongly recommended to first obtain the TCP4 exposed surface which will be saved in ${WORKING_DIRECTORY}/.tcp4-exposures to ensure that the initiator ports are not listening ports of current host. If you don't do this, it will lead to overly loose constraints and may result in capturing inbound traffic."
+         read -r -p "Continue to do this? [y/n] " input
+         input=$(echo "$input" | tr '[:upper:]' '[:lower:]')
+         if [ "$input" == "y" ] || [ "$input" == "yes" ]; then
+            srcTcp4Filter="$(echo ${EXTERNAL_IPV4_ADDRESSES[@]} | tr ' ' '\n' | sed 's#^#src host #g' | sed ':a;N;s/\n/ or /;ba')"
+            echo "[Warn] We will use external IP as filtering condition: $srcTcp4Filter"
+         else
+            exit 0
+         fi
+      else
+         srcTcp4Filter=$(sed 's#:# #g' ${WORKING_DIRECTORY}/.tcp4-exposures | group_by_1st_column_no_limit | awk '{print "src host "$1" and not src port "$2}' | sed 's#,# and not src port #g' | sed ':a;N;$!ba;s/\n/ or /g')
+      fi
+
+      if [ ! -f ${WORKING_DIRECTORY}/.udp4-exposures ]; then
+         echo "[Warn] As tcpdump cannot determine the initiator and receiver of a session in a packet, it is strongly recommended to first obtain the UDP4 exposed surface which will be saved in ${WORKING_DIRECTORY}/.udp4-exposures to ensure that the initiator ports are not listening ports of current host. If you don't do this, it will lead to overly loose constraints and may result in capturing inbound traffic."
+         read -r -p "Continue to do this? [y/n] " input
+         input=$(echo "$input" | tr '[:upper:]' '[:lower:]')
+         if [ "$input" == "y" ] || [ "$input" == "yes" ]; then
+            srcUdp4Filter="$(echo ${EXTERNAL_IPV4_ADDRESSES[@]} | tr ' ' '\n' | sed 's#^#src host #g' | sed ':a;N;s/\n/ or /;ba')"
+            echo "[Warn] We will use external IP as filtering condition: $srcUdp4Filter"
+         else
+            exit 0
+         fi
+      else
+         srcUdp4Filter=$(sed 's#:# #g' ${WORKING_DIRECTORY}/.udp4-exposures | group_by_1st_column_no_limit | awk '{print "src host "$1" and not src port "$2}' | sed 's#,# and not src port #g' | sed ':a;N;$!ba;s/\n/ or /g')
+      fi
+
+      # Destination filtering conditions. The destination needs to filter out the private network of the node, which is not distinguished in TCP/UDP protocol.
+      local dstIpv4Filter=
+      for subnet in ${DOCKER_NETWORK_SUBNETS_IPV4[@]} ${CLUSTER_CIDR_IPV4[@]} ${KVM_SUBNET_ADDRESSES_IPV4[@]} ${VMWARE_SUBNET_ADDRESSES_IPV4[@]} ${K8S_NODES_IPV4_SUBNETS[@]} ${LOOPBACK_SUBNETS_IPV4}; do
+         dstIpv4Filter="$dstIpv4Filter and not dst net $subnet"
+      done
+
+      echo "ip and tcp and ( $srcTcp4Filter )$dstIpv4Filter" > ${WORKING_DIRECTORY}/.tcp4-outbound-packets-filter
+      echo "ip and udp and ( $srcUdp4Filter )$dstIpv4Filter" > ${WORKING_DIRECTORY}/.udp4-outbound-packets-filter
+   fi
+
+   if [ ${#EXTERNAL_IPV6_ADDRESSES[@]} -ne 0 ]; then
+      
+      local srcTcp6Filter=
+      local srcUdp6Filter=
+
+      if [ ! -f ${WORKING_DIRECTORY}/.tcp6-exposures ]; then
+         echo "[Warn] As tcpdump cannot determine the initiator and receiver of a session in a packet, it is strongly recommended to first obtain the TCP4 exposed surface which will be saved in ${WORKING_DIRECTORY}/.tcp6-exposures to ensure that the initiator ports are not listening ports of current host. If you don't do this, it will lead to overly loose constraints and may result in capturing inbound traffic."
+         read -r -p "Continue to do this? [y/n] " input
+         input=$(echo "$input" | tr '[:upper:]' '[:lower:]')
+         if [ "$input" == "y" ] || [ "$input" == "yes" ]; then
+            srcTcp6Filter="$(echo ${EXTERNAL_IPV6_ADDRESSES[@]} | tr ' ' '\n' | sed 's#^#src host #g' | sed ':a;N;s/\n/ or /;ba')"
+            echo "[Warn] We will use external IP as filtering condition: $srcTcp6Filter"
+         else
+            exit 0
+         fi
+      else
+         srcTcp6Filter=$(sed 's#:# #g' ${WORKING_DIRECTORY}/.tcp6-exposures | group_by_1st_column_no_limit | awk '{print "src host "$1" and not src port "$2}' | sed 's#,# and not src port #g' | sed ':a;N;$!ba;s/\n/ or /g')
+      fi
+
+      if [ ! -f ${WORKING_DIRECTORY}/.udp6-exposures ]; then
+         echo "[Warn] As tcpdump cannot determine the initiator and receiver of a session in a packet, it is strongly recommended to first obtain the UDP4 exposed surface which will be saved in ${WORKING_DIRECTORY}/.udp6-exposures to ensure that the initiator ports are not listening ports of current host. If you don't do this, it will lead to overly loose constraints and may result in capturing inbound traffic."
+         read -r -p "Continue to do this? [y/n] " input
+         input=$(echo "$input" | tr '[:upper:]' '[:lower:]')
+         if [ "$input" == "y" ] || [ "$input" == "yes" ]; then
+            srcUdp6Filter="$(echo ${EXTERNAL_IPV6_ADDRESSES[@]} | tr ' ' '\n' | sed 's#^#src host #g' | sed ':a;N;s/\n/ or /;ba')"
+            echo "[Warn] We will use external IP as filtering condition: $srcUdp6Filter"
+         else
+            exit 0
+         fi
+      else
+         srcUdp6Filter=$(sed 's#:# #g' ${WORKING_DIRECTORY}/.udp6-exposures | group_by_1st_column_no_limit | awk '{print "src host "$1" and not src port "$2}' | sed 's#,# and not src port #g' | sed ':a;N;$!ba;s/\n/ or /g')
+      fi
+
+      # Destination filtering conditions. The destination needs to filter out the private network of the node, which is not distinguished in TCP/UDP protocol.
+      local dstIpv6Filter=
+      for subnet in ${DOCKER_NETWORK_SUBNETS_IPV6[@]} ${CLUSTER_CIDR_IPV6[@]} ${KVM_SUBNET_ADDRESSES_IPV6[@]} ${VMWARE_SUBNET_ADDRESSES_IPV6[@]} ${K8S_NODES_IPV6_SUBNETS[@]} ${LOOPBACK_SUBNETS_IPV6}; do
+         dstIpv6Filter="$dstIpv6Filter and not dst net $subnet"
+      done
+
+      echo "ip and tcp and ( $srcTcp6Filter )$dstIpv6Filter" > ${WORKING_DIRECTORY}/.tcp6-outbound-packets-filter
+      echo "ip and udp and ( $srcUdp6Filter )$dstIpv6Filter" > ${WORKING_DIRECTORY}/.udp6-outbound-packets-filter
+   fi
+
+   for i in ${EXTERNAL_INTERFACES[@]}; do
+
+      if [ -f ${WORKING_DIRECTORY}/.tcp4-outbound-packets-filter ]; then
+         nohup $0 --run-outbound-capture-and-summarize-connections "${WORKING_DIRECTORY}/.tcp4-outbound-connections-summary timeout ${PACKETS_CAPTURE_DURATION} tcpdump -i $i -lqnn -F ${WORKING_DIRECTORY}/.tcp4-outbound-packets-filter" &
+      fi
+
+      if [ -f ${WORKING_DIRECTORY}/.udp4-outbound-packets-filter ]; then
+         nohup $0 --run-outbound-capture-and-summarize-connections "${WORKING_DIRECTORY}/.udp4-outbound-connections-summary timeout ${PACKETS_CAPTURE_DURATION} tcpdump -i $i -lqnn -F ${WORKING_DIRECTORY}/.udp4-outbound-packets-filter" &
+      fi
+
+      if [ -f ${WORKING_DIRECTORY}/.tcp6-outbound-packets-filter ]; then
+         nohup $0 --run-outbound-capture-and-summarize-connections "${WORKING_DIRECTORY}/.tcp6-outbound-connections-summary timeout ${PACKETS_CAPTURE_DURATION} tcpdump -i $i -lqnn -F ${WORKING_DIRECTORY}/.tcp6-outbound-packets-filter" &
+      fi
+
+      if [ -f ${WORKING_DIRECTORY}/.udp6-outbound-packets-filter ]; then
+         nohup $0 --run-outbound-capture-and-summarize-connections "${WORKING_DIRECTORY}/.udp6-outbound-connections-summary timeout ${PACKETS_CAPTURE_DURATION} tcpdump -i $i -lqnn -F ${WORKING_DIRECTORY}/.udp6-outbound-packets-filter" &
+      fi
+   done
+
+}
+
+#
+# [Note] Please use this function on each node of target K8s cluster. Please use merged connection summaries. Please filter out the inner-connections of K8s clusters first. Most of strategies to be migrated are NodePort stategies.
+#
+run_strategies_migration_verification() {
+
+   load_external_ip_addresses_from_file
+   
+   local i=
+   local j=
+   local k=
+
+   # 1. inbound strategies verification
+   #  [1] Generate strategies verification table
+   if [ -f ${WORKING_DIRECTORY}/.tcp4-connections-summary ]; then
+      >${WORKING_DIRECTORY}/.tcp4-connections-verification
+   fi
+
+   for i in $(cat ${WORKING_DIRECTORY}/.tcp4-connections-summary); do
+      for j in ${EXTERNAL_IPV4_ADDRESSES[@]}; do
+         local srcHost=$(echo $i | sed 's#^\([^,]*\),.*#\1#g')
+         local dstPort=$(echo $i | sed 's#.*\.\([0-9]*\)$#\1#g')
+         k="$srcHost,$j.$dstPort"
+         echo "$k" >> ${WORKING_DIRECTORY}/.tcp4-connections-verification
+      done
+   done
+
+   sort -t',' -k1,1 ${WORKING_DIRECTORY}/.tcp4-connections-verification | tr ',' ' ' | group_by_1st_column | sed 's# # → #g'
+
+   # 2. check port listenings and start nc test pile
+   # 3. 
+   ${EXTERNAL_IPV4_ADDRESSES}
+   
+   # outbound strategies verification
+}
+
+#
+#
+#
+generate_switch_strategies() {
+   :
+}
+
+translate_connections_summary_with_cmdb() {
+   :
+}
+
+#
+# [Note] Analyzing non TCP/UDP protocols, data packets of such protocols should be released on the migration destination switch.
+#
+capture_non_tcp_udp_packets() {
+
+   load_external_interfaces_from_file
+   load_external_ip_addresses_from_file
+   load_docker_subnet_addresses_from_file
+   load_cluster_cidr_from_file
+   load_service_cidr_from_file
+   load_kvm_subnet_addresses_from_file
+   load_vmware_subnet_addresses_from_file
+
+   local subnet=
+   local ipv4Subnets=
+   local ipv6Subnets=
+
+   for subnet in ${DOCKER_NETWORK_SUBNETS_IPV4[@]} ${CLUSTER_CIDR_IPV4[@]} ${KVM_SUBNET_ADDRESSES_IPV4[@]} ${VMWARE_SUBNET_ADDRESSES_IPV4[@]} ${LOOPBACK_SUBNETS_IPV4}; do
+      ipv4Subnets="$ipv4Subnets and not net $subnet"
+   done
+
+   for subnet in ${DOCKER_NETWORK_SUBNETS_IPV6[@]} ${CLUSTER_CIDR_IPV6[@]} ${KVM_SUBNET_ADDRESSES_IPV6[@]} ${VMWARE_SUBNET_ADDRESSES_IPV6[@]} ${LOOPBACK_SUBNETS_IPV6}; do
+      ipv6Subnets="$ipv6Subnets and not net $subnet"
+   done
+
+   echo "ip and not tcp and not udp$ipv4Subnets or ip6 and not tcp and not udp$ipv6Subnets" > ${WORKING_DIRECTORY}/.non-tcp-udp-packets-filter
+
+   exit 0
+}
+
 orderedPara=(
    "--dump-dnat-strategy-tables"
    "--concurrent-process-dnat-exposures"
@@ -1970,6 +2223,9 @@ orderedPara=(
    "--preventive-iptables-allow-rules"
    "--get-iptables-allow-rules-from-connections-summary"
    "--get-iptables-reject-rules-from-exposures"
+   "--run-outbound-capture-and-summarize-connections"
+   "--concurrently-run-outbound-captures"
+   "--capture-non-tcp-udp-packets"
    "--usage"
    "--help"
    "--manual"
@@ -1993,6 +2249,9 @@ declare -A mapParaFunc=(
    ["--preventive-iptables-allow-rules"]="preventive_iptables_allow_rules"
    ["--get-iptables-allow-rules-from-connections-summary"]="get_iptables_allow_rules_from_connections_summary"
    ["--get-iptables-reject-rules-from-exposures"]="get_iptables_reject_rules_from_exposures"
+   ["--run-outbound-capture-and-summarize-connections"]="run_outbound_capture_and_summarize_connections"
+   ["--concurrently-run-outbound-captures"]="concurrently_run_outbound_captures"
+   ["--capture-non-tcp-udp-packets"]="capture_non_tcp_udp_packets"
    ["--usage"]="usage"
    ["--help"]="usage"
    ["--manual"]="usage"
@@ -2016,6 +2275,9 @@ declare -A mapParaSpec=(
    ["--preventive-iptables-allow-rules"]="Advance policy deployment of the private network of the current node to avoid connection failure after subsequent security reinforcement."
    ["--get-iptables-allow-rules-from-connections-summary"]="Generate a network policy release script based on network connection summary data."
    ["--get-iptables-reject-rules-from-exposures"]="Generate Iptables packet dropout strategy script based on TCP4/6 and UDP4/6 port exposures data."
+   ["--run-outbound-capture-and-summarize-connections"]="Execute a single outbound packet capture task, during which a connection summary will be output."
+   ["--concurrently-run-outbound-captures"]="Concurrent launch of outbound packet capture task."
+   ["--capture-non-tcp-udp-packets"]="Capture non TCP and non UDP packets."
    ["--usage"]="Simplified operation manual."
    ["--help"]="Simplified operation manual."
    ["--manual"]="Simplified operation manual."

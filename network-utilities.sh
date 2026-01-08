@@ -468,6 +468,9 @@ get_k8s_nodes_ip_addresses() {
    K8S_NODES_IPV4_ADDRESSES=()
    K8S_NODES_IPV6_ADDRESSES=()
    K8S_NODES_IP_ADDRESSES=($(kubectl get node --request-timeout=8s -o json 2>/dev/null | jq -r -c '.items[].status.addresses[]|select(.type=="InternalIP")|.address' 2>/dev/null))
+   K8S_NODES_IPV4_SUBNETS=()
+   K8S_NODES_IPV6_SUBNETS=()
+   K8S_NODES_SUBNETS=()
 
    local i=
    for i in ${K8S_NODES_IP_ADDRESSES[@]}; do
@@ -484,14 +487,21 @@ get_k8s_nodes_ip_addresses() {
 
    if [ ${#K8S_NODES_IPV4_ADDRESSES[@]} -ne 0 ]; then
       echo ${K8S_NODES_IPV4_ADDRESSES[@]} | tr ' ' '\n' > ${WORKING_DIRECTORY}/.k8s-nodes-ipv4
+      # Convert IP list to subnets list
+      K8S_NODES_IPV4_SUBNETS=($(python3 ${WORKING_DIRECTORY}/iprange3.py --to-subnets "${K8S_NODES_IPV4_ADDRESSES[@]}" | tr ' ' '\n'))
+      echo ${K8S_NODES_IPV4_SUBNETS[@]} | tr ' ' '\n' > ${WORKING_DIRECTORY}/.k8s-nodes-ipv4-subnets
    fi
 
    if [ ${#K8S_NODES_IPV6_ADDRESSES[@]} -ne 0 ]; then
       echo ${K8S_NODES_IPV6_ADDRESSES[@]} | tr ' ' '\n' > ${WORKING_DIRECTORY}/.k8s-nodes-ipv6
+      K8S_NODES_IPV6_SUBNETS=($(python3 ${WORKING_DIRECTORY}/iprange3.py --to-subnets "${K8S_NODES_IPV6_ADDRESSES[@]}" | tr ' ' '\n'))
+      echo ${K8S_NODES_IPV6_SUBNETS[@]} | tr ' ' '\n' > ${WORKING_DIRECTORY}/.k8s-nodes-ipv6-subnets
    fi
 
    if [ ${#K8S_NODES_IP_ADDRESSES[@]} -ne 0 ]; then
       echo ${K8S_NODES_IP_ADDRESSES[@]} | tr ' ' '\n' > ${WORKING_DIRECTORY}/.k8s-nodes
+      K8S_NODES_SUBNETS=($(python3 ${WORKING_DIRECTORY}/iprange3.py --to-subnets "${K8S_NODES_IP_ADDRESSES[@]}" | tr ' ' '\n'))
+      echo ${K8S_NODES_SUBNETS[@]} | tr ' ' '\n' > ${WORKING_DIRECTORY}/.k8s-nodes-subnets
    fi
 }
 
@@ -571,10 +581,6 @@ get_vmware_subnet_addresses() {
    VMWARE_SUBNET_ADDRESSES_IPV4=($(standardize_ip_addresses ${VMWARE_SUBNET_ADDRESSES_IPV4[@]}))
    VMWARE_SUBNET_ADDRESSES_IPV6=($(standardize_ip_addresses ${VMWARE_SUBNET_ADDRESSES_IPV6[@]}))
 
-   echo '[Info] VMware subnet addresses are as below:'
-   echo ${VMWARE_SUBNET_ADDRESSES[@]} | tr ' ' '\n' | grep -v '^$' | sed 's#^#   #g'
-   echo
-
    if [ ${#VMWARE_SUBNET_ADDRESSES_IPV4[@]} -ne 0 ]; then
       echo "${VMWARE_SUBNET_ADDRESSES_IPV4[@]}" | tr ' ' '\n' > ${WORKING_DIRECTORY}/.vmware-networks-ipv4
    fi
@@ -585,6 +591,9 @@ get_vmware_subnet_addresses() {
 
    if [ ${#VMWARE_SUBNET_ADDRESSES[@]} -ne 0 ]; then
       echo "${VMWARE_SUBNET_ADDRESSES[@]}" | tr ' ' '\n' > ${WORKING_DIRECTORY}/.vmware-networks
+      echo '[Info] VMware subnet addresses are as below:'
+      echo ${VMWARE_SUBNET_ADDRESSES[@]} | tr ' ' '\n' | grep -v '^$' | sed 's#^#   #g'
+      echo
    fi
 }
 
