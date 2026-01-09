@@ -36,10 +36,12 @@
 # [16] External IP is based on existing generation logic, with nodeport port listening and nodeport iptables (newer k8s version). [Done]
 # [17] Outbound packet capture and summarization. [Done]
 # [18] Auxiliary strategy verification function.
-# [19] Generation of switch deployment strategy.
+# [19] Generation of switch deployment strategy. [Done]
 # [20] Integrate CMDB strategy translation.
-# [21] 分析无效流量，包括RST包，通常会引起主机连接率下降。
-# [22] 针对FTP协议的专项处理模式，通常为
+# [21] Analyzing invalid traffic, mainly including RST packets, usually causes a decrease in host connection rate.
+# [22] A specialized processing mode for FTP protocol, with the target end being a dynamically open listening port.
+# [23] Large scale cluster with multiple nodes for unified scheduling.
+# [24] Remote batch push
 
 #########################################
 # Verifications                         #
@@ -226,6 +228,13 @@ WORKING_DIRECTORY=$(dirname $(realpath $0))
 if [ $? -ne 0 ]; then
    WORKING_DIRECTORY=$(pwd)
 fi
+
+#
+# 7. Max Jobs of concurrent process
+#
+MAX_JOBS=36
+
+LEGACY_SSHD_ORIGINAL_PORT=22
 
 #
 # [Note] A list of Container Network Interface (CNI) plugins. Simply put, its main function is to provide a collection of common options for networking solutions for Kubernetes clusters.
@@ -549,6 +558,75 @@ writeback_temporary_file() {
    
    /usr/bin/mv -f $temporaryFilePath $originalFilePath
    echo "[Info] Writeback $temporaryFilePath → $originalFilePath"
+}
+
+deliver() {
+
+   local localFile=$1
+   local sshServer=$2
+   local sshPort=$3
+   local remoteFolder=$(dirname $(realpath $localFile))
+
+   ssh -p $sshPort $sshServer "mkdir -p $remoteFolder"
+
+   scp -o ConnectTimeout=5 -P $sshPort -rp $localFile $sshServer:$remoteFolder 2>/dev/null
+}
+
+#
+# [Note] Push specified file to all K8s nodes
+#
+batch_remote_deliver() {
+
+   local filePath=$1
+   local jobCount=0
+
+   if [ -z "$filePath" ] || [ ! -f "$filePath" ]; then
+      echo '[Warn] Please provide a valid path of the file to be delivered.'
+      exit -1
+   fi
+
+   load_k8s_nodes_ip_addresses_from_file
+
+   for i in ${K8S_NODES_IP_ADDRESSES[@]}; do
+      (deliver $filePath $i ${LEGACY_SSHD_ORIGINAL_PORT}) &
+      ((jobCount++))
+
+      if [[ $jobCount -ge ${MAX_JOBS} ]]; then
+         wait          # Waiting for all current background tasks to end
+         jobCount=0    # Reset counter
+      fi
+   done
+
+   wait
+
+   echo "[Complete]"
+}
+
+batch_remote_execute() {
+
+   local commands="${*}"
+   local jobCount=0
+
+   if [ -z "$filePath" ] || [ ! -f "$filePath" ]; then
+      echo '[Warn] Please provide a valid path of the file to be delivered.'
+      exit -1
+   fi
+
+   load_k8s_nodes_ip_addresses_from_file
+
+   for i in ${K8S_NODES_IP_ADDRESSES[@]}; do
+      ("$commands") &
+      ((jobCount++))
+
+      if [[ $jobCount -ge ${MAX_JOBS} ]]; then
+         wait          # Waiting for all current background tasks to end
+         jobCount=0    # Reset counter
+      fi
+   done
+
+   wait
+
+   echo "[Complete]"
 }
 
 #########################################
@@ -2387,6 +2465,8 @@ capture_invalid_rst_packets() {
 }
 
 orderedPara=(
+   "--batch-remote-deliver"
+   "--batch-remote-execute"
    "--dump-dnat-strategy-tables"
    "--concurrent-process-dnat-exposures"
    "--show-dnat-exposures-perspective"
@@ -2415,6 +2495,8 @@ orderedPara=(
 # Maps between shell options and functions
 #
 declare -A mapParaFunc=(
+   ["--batch-remote-deliver"]="batch_remote_deliver"
+   ["--batch-remote-execute"]="batch_remote_execute"
    ["--dump-dnat-strategy-tables"]="dump_dnat_strategy_tables"
    ["--concurrent-process-dnat-exposures"]="concurrent_process_dnat_exposures"
    ["--show-dnat-exposures-perspective"]="show_dnat_exposures_perspective"
@@ -2443,6 +2525,8 @@ declare -A mapParaFunc=(
 # Maps between shell options and specifications
 #
 declare -A mapParaSpec=(
+   ["--batch-remote-deliver"]="Batchly push specified files to remote nodes."
+   ["--batch-remote-execute"]="Batchly execute some commands on remote nodes."
    ["--dump-dnat-strategy-tables"]="Query iptables DNAT strategies and save them in hidden files."
    ["--concurrent-process-dnat-exposures"]="Concurrently process iptables DNAT strategites and save them in original hidden files."
    ["--show-dnat-exposures-perspective"]="Tracking the exposed forwarding surface of iptables NAT through linked lists."
