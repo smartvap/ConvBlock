@@ -34,11 +34,12 @@
 # [14] Add comment to all generated strategies. [Done]
 # [15] netstat -anltp needs to be replaced with ss -nltp to improve the query efficiency and accuracy of the listening ports. [Done]
 # [16] External IP is based on existing generation logic, with nodeport port listening and nodeport iptables (newer k8s version). [Done]
-# [17] Outbound packet capture and summarization.
+# [17] Outbound packet capture and summarization. [Done]
 # [18] Auxiliary strategy verification function.
 # [19] Generation of switch deployment strategy.
 # [20] Integrate CMDB strategy translation.
-# [21] 
+# [21] 分析无效流量，包括RST包，通常会引起主机连接率下降。
+# [22] 针对FTP协议的专项处理模式，通常为
 
 #########################################
 # Verifications                         #
@@ -128,11 +129,6 @@ fi
 pip2 show ipaddress -q 2>/dev/null
 if [ $? -ne 0 ]; then
    pip2 install ipaddress-1.0.23-py2.py3-none-any.whl -q 2>/dev/null
-   exit -1
-fi
-
-if [ -z "$(which kubectl 2>/dev/null)" ] && [ -z "$(alias kubectl 2>/dev/null)" ]; then
-   echo '[Warn] The current script depends on running on a node that deploys kubectl and has administrative privileges on the K8s cluster.'
    exit -1
 fi
 
@@ -248,7 +244,7 @@ CNI_TYPES=(
 #
 # [Note] The subnets on Loopback Interface. The system service can listen at address 127.0.0.0/8, so that the service is only available locally and will not be exposed to external networks, improving security. Use ip a show lo to get the subnets addresses. Not strict mode.
 #
-LOOPBACK_SUBNETS_IPV4=127.0.0.1/8
+LOOPBACK_SUBNETS_IPV4=127.0.0.0/8
 LOOPBACK_SUBNETS_IPV6=::1/128
 
 PREFER_IPV6=false
@@ -1989,11 +1985,28 @@ run_outbound_capture_and_summarize_connections() {
 
       if [ $(echo "$line" | grep -i -w 'IP' | wc -l) -ne 0 ]; then
          # IPv4 Packets
-         packet=$(echo "$line" | awk '{print $3,$5}' | sed 's#^\([0-9.]*\)\.[0-9]*\ \([0-9.]*\)\.\([0-9]*\).*#\1,\2.\3#g')
+         packet=$(echo "$line" | awk '{print $3,$5}' | sed 's#^\([0-9.]*\)\.\([0-9]*\)\ \([0-9.]*\)\.\([0-9]*\).*#\1.\2,\3.\4#g')
+
+         # If it is a TCP packet, port detection can be performed on the remote endpoint. If the remote endpoint is in an port open state, it is confirmed as an outbound packet. Otherwise, the remote endpoint may be the initiator of the session. This detection is used to filter out invalid packets, but unavailable for the FTP packets and UDP packets.
+         if [ $(echo "$line" | grep -i -w 'tcp' | wc -l) -ne 0 ]; then
+            dstHost=$(echo $packet | sed 's#^[0-9.]*\.[0-9]*,\([0-9.]*\)\.\([0-9]*\)$#\1#g')
+            dstPort=$(echo $packet | sed 's#^[0-9.]*\.[0-9]*,\([0-9.]*\)\.\([0-9]*\)$#\2#g')
+            nc -4nvz -w 2 $dstHost $dstPort 1>/dev/null 2>/dev/null || continue
+         fi
+
+         packet=$(echo "$packet" | sed 's#^\([0-9.]*\)\.[0-9]*,\([0-9.]*\)\.\([0-9]*\)$#\1,\2.\3#g')
       elif [ $(echo "$line" | grep -i -w 'IP6' | wc -l) -ne 0 ]; then
          # IPv6 Packets
          # "10:11:20.174380 IP6 2001:db8::1.10884 > 2001:db8::2.10250: tcp 0" → "2001:db8::1,2001:db8::2.10250"
-         packet=$(echo "$line" | awk '{print $3,$5}' | sed 's#^\([^.]*\)\.[0-9]*\ \([^.]*\)\.\([0-9]*\).*#\1,\2.\3#g')
+         packet=$(echo "$line" | awk '{print $3,$5}' | sed 's#^\([^.]*\)\.\([0-9]*\)\ \([^.]*\)\.\([0-9]*\).*#\1.\2,\3.\4#g')
+
+         if [ $(echo "$line" | grep -i -w 'tcp' | wc -l) -ne 0 ]; then
+            dstHost=$(echo $packet | sed 's#^[^.]*\.[0-9]*,\([^.]*\)\.\([0-9]*\)$#\1#g')
+            dstPort=$(echo $packet | sed 's#^[^.]*\.[0-9]*,\([^.]*\)\.\([0-9]*\)$#\2#g')
+            nc -6nvz -w 2 $dstHost $dstPort 1>/dev/null 2>/dev/null || continue
+         fi
+
+         packet=$(echo "$packet" | sed 's#^\([^.]*\)\.[0-9]*,\([^.]*\)\.\([0-9]*\)$#\1,\2.\3#g')
       fi
 
       if [ $(echo "$packet" | grep "^$" | wc -l) -ne 0 ]; then
@@ -2111,6 +2124,8 @@ concurrently_run_outbound_captures() {
       echo "ip and udp and ( $srcUdp6Filter )$dstIpv6Filter" > ${WORKING_DIRECTORY}/.udp6-outbound-packets-filter
    fi
 
+   local i=
+
    for i in ${EXTERNAL_INTERFACES[@]}; do
 
       if [ -f ${WORKING_DIRECTORY}/.tcp4-outbound-packets-filter ]; then
@@ -2168,10 +2183,140 @@ run_strategies_migration_verification() {
 }
 
 #
+# [Note] Generate Cisco Switch Access Control List Configuration Script
 #
+generate_cisco_acl_scripts() {
+
+   local connectionSummaryPath=$1
+   local protocol=$2
+   local protocolType=
+   local direction=$3
+   local preposition=
+   local endpoints=
+   local aclScriptFile=$4
+
+   if [ -z "$connectionSummaryPath" ] || [ ! -f "$connectionSummaryPath" ] || [ -s "$connectionSummaryPath" ]; then
+      echo '[Warn] Please provide a valid connection summary file path.'
+      exit -1
+   fi
+
+   if [ -z "$protocol" ] || [ -z "$(echo "$protocol" | grep -i -w -E 'tcp4|udp4|tcp6|udp6')" ]; then
+      echo '[Warn] Please provide a valid IP protocol: tcp4, udp4, tcp6 or udp6.'
+      exit -1
+   fi
+
+   protocolType=$(echo $protocol | tr -d '[:digit:]')
+
+   if [ -z "$direction" ] || [ -z "$(echo "$direction" | grep -i -w -E 'inbound|outbound')" ]; then
+      echo '[Warn] Please provide a valid direction: inbound, outbound.'
+      exit -1
+   fi
+
+   if [ -z "$aclScriptFile" ]; then
+      echo '[Warn] Please provide a valid acl script file path (target file).'
+      exit -1
+   fi
+
+   if [ "$direction" == "outbound" ]; then
+      preposition="FROM"
+      endpoints=$(awk -F, '{print $1}' $connectionSummaryPath | sort -u | head -1)
+   else
+      preposition="TO"
+      endpoints=$(sed 's#^.*,\(.*\)\.[0-9]*$#\1#g' $connectionSummaryPath | sort -u | head -1)
+   fi
+
+   >$aclScriptFile
+
+   echo "ip access-list extended PERMIT_$protocol_$preposition_$endpoints" >> $aclScriptFile
+   sed "s#^\([^,]*\),\(.*\)\.\([0-9]*\)$# permit $protocolType host \1 host \2 eq \3#g" $connectionSummaryPath >> $aclScriptFile
+   echo >> $aclScriptFile
+
+   echo 'interface GigabitEthernet_/_/_' >> $aclScriptFile
+   echo " description Link to Host $endpoints" >> $aclScriptFile
+   echo " ip access-group PERMIT_$protocol_$preposition_$endpoints in" >> $aclScriptFile
+}
+
 #
-generate_switch_strategies() {
-   :
+# [Note] Generate New H3C Switch Access Control List Configuration Script
+#
+generate_h3c_acl_scripts() {
+
+   local connectionSummaryPath=$1
+   local protocol=$2
+   local protocolType=
+   local direction=$3
+   local preposition=
+   local endpoints=
+   local aclScriptFile=$4
+
+   if [ -z "$connectionSummaryPath" ] || [ ! -f "$connectionSummaryPath" ] || [ -s "$connectionSummaryPath" ]; then
+      echo '[Warn] Please provide a valid connection summary file path.'
+      exit -1
+   fi
+
+   if [ -z "$protocol" ] || [ -z "$(echo "$protocol" | grep -i -w -E 'tcp4|udp4|tcp6|udp6')" ]; then
+      echo '[Warn] Please provide a valid IP protocol: tcp4, udp4, tcp6 or udp6.'
+      exit -1
+   fi
+
+   if [ -z "$direction" ] || [ -z "$(echo "$direction" | grep -i -w -E 'inbound|outbound')" ]; then
+      echo '[Warn] Please provide a valid direction: inbound, outbound.'
+      exit -1
+   fi
+
+   if [ -z "$aclScriptFile" ]; then
+      echo '[Warn] Please provide a valid acl script file path (target file).'
+      exit -1
+   fi
+
+   if [ "$direction" == "outbound" ]; then
+      preposition="FROM"
+      endpoints=$(awk -F, '{print $1}' $connectionSummaryPath | sort -u | head -1)
+   else
+      preposition="TO"
+      endpoints=$(sed 's#^.*,\(.*\)\.[0-9]*$#\1#g' $connectionSummaryPath | sort -u | head -1)
+   fi
+
+   >$aclScriptFile
+
+   local aclNumber=$(( RANDOM % 8001 + 1000 ))
+   local ruleId=5
+   local srcHost=
+   local dstHost=
+   local dstPort=
+
+   echo "system-view" >> $aclScriptFile
+   echo "acl number $aclNumber" >> $aclScriptFile
+
+   for i in $(cat $connectionSummaryPath); do
+      srcHost=$(echo "$i" | sed 's#^\([^,]*\),[^,]*\.[0-9]*$#\1#g')
+      dstHost=$(echo "$i" | sed 's#^[^,]*,\([^,]*\)\.[0-9]*$#\1#g')
+      dstPort=$(echo "$i" | sed 's#^[^,]*,[^,]*\.\([0-9]*\)$#\1#g')
+
+      echo " rule $ruleId permit $protocolType source $srcHost 0 destination $dstHost 0 destination-port eq $dstPort" >> $aclScriptFile
+      acl=$(expr $acl + 5)
+   done
+
+   echo "quit" >> $aclScriptFile
+
+   # Configure stream classifier
+   echo "traffic classifier CLASSIFIER_$endpoints" >> $aclScriptFile
+   echo " if-match acl $aclNumber" >> $aclScriptFile
+   echo "quit" >> $aclScriptFile
+
+   # Configure stream behaviour
+   echo "traffic behavior BEHAVIOR_$endpoints" >> $aclScriptFile
+   echo " permit" >> $aclScriptFile
+   echo "quit" >> $aclScriptFile
+
+   # Create stream strategy
+   echo "traffic policy POLICY_$endpoints" >> $aclScriptFile
+   echo " classifier CLASSIFIER_$endpoints behavior BEHAVIOR_$endpoints" >> $aclScriptFile
+   echo "quit" >> $aclScriptFile
+
+   echo "interface GigabitEthernet_/_/_" >> $aclScriptFile # Please replace with the actual interface
+   echo " traffic-policy POLICY_$endpoints $direction" >> $aclScriptFile
+   echo "quit" >> $aclScriptFile
 }
 
 translate_connections_summary_with_cmdb() {
@@ -2205,7 +2350,40 @@ capture_non_tcp_udp_packets() {
 
    echo "ip and not tcp and not udp$ipv4Subnets or ip6 and not tcp and not udp$ipv6Subnets" > ${WORKING_DIRECTORY}/.non-tcp-udp-packets-filter
 
-   exit 0
+   touch ${WORKING_DIRECTORY}/.non-tcp-udp-connections-summary
+
+   echo '[Info] Please wait for the packet capture to be completed ...'
+
+   timeout ${PACKETS_CAPTURE_DURATION} tcpdump -i any -lqnn -F ${WORKING_DIRECTORY}/.non-tcp-udp-packets-filter 2>/dev/null | while IFS= read -r line; do
+      
+      if [ $(echo "$line" | grep -i -w 'IP' | wc -l) -ne 0 ]; then
+         # IPv4 Packets
+         # [Example] 134.80.135.43 134.80.135.45: VRRPv2
+         packet=$(echo "$line" | awk '{print $3","$5","$6}')
+      elif [ $(echo "$line" | grep -i -w 'IP6' | wc -l) -ne 0 ]; then
+         # IPv6 Packets
+         packet=$(echo "$line" | awk '{print $3","$5","$6}')
+      fi
+
+      if [ $(echo "$packet" | grep "^$" | wc -l) -ne 0 ]; then
+         # Check Empty lines
+         continue
+      fi
+
+      # Add parameter FX to avoid partial content matching
+      if [ $(grep -Fx $packet ${WORKING_DIRECTORY}/.non-tcp-udp-connections-summary | wc -l) -eq 0 ]; then
+         echo $packet >> ${WORKING_DIRECTORY}/.non-tcp-udp-connections-summary
+      fi
+   done
+
+   echo "[Info] The packets have been summarized into file ${WORKING_DIRECTORY}/.non-tcp-udp-connections-summary"
+}
+
+#
+# Not implemented
+#
+capture_invalid_rst_packets() {
+   tcpdump -i any -nn 'tcp[tcpflags] & tcp-rst != 0'
 }
 
 orderedPara=(
@@ -2226,6 +2404,8 @@ orderedPara=(
    "--run-outbound-capture-and-summarize-connections"
    "--concurrently-run-outbound-captures"
    "--capture-non-tcp-udp-packets"
+   "--generate-cisco-acl-scripts"
+   "--generate-h3c-acl-scripts"
    "--usage"
    "--help"
    "--manual"
@@ -2252,6 +2432,8 @@ declare -A mapParaFunc=(
    ["--run-outbound-capture-and-summarize-connections"]="run_outbound_capture_and_summarize_connections"
    ["--concurrently-run-outbound-captures"]="concurrently_run_outbound_captures"
    ["--capture-non-tcp-udp-packets"]="capture_non_tcp_udp_packets"
+   ["--generate-cisco-acl-scripts"]="generate_cisco_acl_scripts"
+   ["--generate-h3c-acl-scripts"]="generate_h3c_acl_scripts"
    ["--usage"]="usage"
    ["--help"]="usage"
    ["--manual"]="usage"
@@ -2278,6 +2460,8 @@ declare -A mapParaSpec=(
    ["--run-outbound-capture-and-summarize-connections"]="Execute a single outbound packet capture task, during which a connection summary will be output."
    ["--concurrently-run-outbound-captures"]="Concurrent launch of outbound packet capture task."
    ["--capture-non-tcp-udp-packets"]="Capture non TCP and non UDP packets."
+   ["--generate-cisco-acl-scripts"]="Generate CISCO switch ACL configuration scripts. <usage> $0 --generate-cisco-acl-scripts <conn-summary-file> <tcp4/6|udp4/6> <inbound|outbound> <target-file>"
+   ["--generate-h3c-acl-scripts"]="Generate H3C switch ACL configuration scripts. <usage> $0 --generate-h3c-acl-scripts <conn-summary-file> <tcp4/6|udp4/6> <inbound|outbound> <target-file>"
    ["--usage"]="Simplified operation manual."
    ["--help"]="Simplified operation manual."
    ["--manual"]="Simplified operation manual."
