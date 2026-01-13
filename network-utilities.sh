@@ -191,6 +191,159 @@ get_docker_subnet_addresses() {
 }
 
 #
+# [Note] Experimental Features.
+#
+get_podman_subnet_addresses() {
+
+   PODMAN_NETWORK_SUBNETS=($(podman network inspect $(podman network ls -q 2>/dev/null) 2>/dev/null | jq -r '.[] | if .subnets then .subnets[].subnet else empty end' 2>/dev/null))
+
+   PODMAN_NETWORK_SUBNETS=($(standardize_ip_addresses ${PODMAN_NETWORK_SUBNETS[@]} | tr ' ' '\n'))
+
+   echo '[Info] Podman network subnets are as below:'
+   echo ${PODMAN_NETWORK_SUBNETS[@]} | tr ' ' '\n' | grep -v '^$' | sed 's#^#   #g'
+   echo
+
+   echo ${PODMAN_NETWORK_SUBNETS[@]} | tr ' ' '\n' > ${WORKING_DIRECTORY}/.podman-networks
+
+   PODMAN_NETWORK_SUBNETS_IPV4=()
+   PODMAN_NETWORK_SUBNETS_IPV6=()
+
+   local i=
+   for i in ${PODMAN_NETWORK_SUBNETS[@]}; do
+      local ipFamily=$(python3 ${WORKING_DIRECTORY}/network-utilities.py --get-ip-family $i)
+      if [ "$ipFamily" == "IPv4" ]; then
+         PODMAN_NETWORK_SUBNETS_IPV4=(${PODMAN_NETWORK_SUBNETS_IPV4[@]} $i)
+      elif [ "$ipFamily" == "IPv6" ]; then
+         PODMAN_NETWORK_SUBNETS_IPV6=(${PODMAN_NETWORK_SUBNETS_IPV6[@]} $i)
+      fi
+   done
+
+   echo ${PODMAN_NETWORK_SUBNETS_IPV4[@]} | tr ' ' '\n' > ${WORKING_DIRECTORY}/.podman-networks-ipv4
+   echo ${PODMAN_NETWORK_SUBNETS_IPV6[@]} | tr ' ' '\n' > ${WORKING_DIRECTORY}/.podman-networks-ipv6
+}
+
+#
+# [Note] Experimental Features.
+#
+get_lxc_subnet_addresses() {
+
+   local i=
+   local j=
+   local k=
+
+   for i in $(lxc network list --format json | jq -r 'keys[]'); do
+
+      j=$(lxc network get $network ipv4.address)
+      k=$(lxc network get $network ipv6.address)
+
+      if [ -z "$j" ]; then
+         LXC_SUBNETS_IPV4=(${LXC_NETWORK_SUBNETS_IPV4[@]} $j)
+         LXC_SUBNETS=(${LXC_SUBNETS[@]} $j)
+      fi
+
+      if [ -z "$k" ]; then
+         LXC_SUBNETS_IPV6=(${LXC_NETWORK_SUBNETS_IPV4[@]} $k)
+         LXC_SUBNETS=(${LXC_SUBNETS[@]} $k)
+      fi
+   done
+
+   echo ${LXC_SUBNETS_IPV4[@]} | tr ' ' '\n' > ${WORKING_DIRECTORY}/.lxc-networks-ipv4
+   echo ${LXC_SUBNETS_IPV6[@]} | tr ' ' '\n' > ${WORKING_DIRECTORY}/.lxc-networks-ipv6
+   echo ${LXC_SUBNETS[@]} | tr ' ' '\n' > ${WORKING_DIRECTORY}/.lxc-networks
+}
+
+#
+# [Note] Experimental Features.
+#
+dump_cluster_cidr_from_flannel_cm() {
+
+   FLANNEL_NS=$(kubectl get cm --all-namespaces --request-timeout=8s -o custom-columns='NAMESPACE:.metadata.namespace,NAME:.metadata.name' 2>/dev/null | awk '$2 == "kube-flannel-cfg" {print $1}')
+
+   if [ -z "${FLANNEL_NS}" ]; then
+      echo '[Info] Flannel plugin is not found.'
+      return
+   fi
+
+   CLUSTER_CIDR_IPV4=($(kubectl -n ${FLANNEL_NS} get cm kube-flannel-cfg --request-timeout=8s -o json 2>/dev/null | jq -r '.data."net-conf.json"' | jq -r '.Network'))
+   CLUSTER_CIDR_IPV6=($(kubectl -n ${FLANNEL_NS} get cm kube-flannel-cfg --request-timeout=8s -o json 2>/dev/null | jq -r '.data."net-conf.json"' | jq -r '.IPv6Network'))
+   CLUSTER_CIDR=(${CLUSTER_CIDR_IPV4[@]} ${CLUSTER_CIDR_IPV6[@]})
+
+   echo '[Info] K8s cluster CIDRs are as below:'
+   echo "${CLUSTER_CIDR[@]}" | tr ' ' '\n' | sed 's#^#   #g'
+
+   # The alternative variable names, compatible with other situations
+   POD_CIDR_IPV4=(${CLUSTER_CIDR_IPV4[@]})
+   POD_CIDR_IPV6=(${CLUSTER_CIDR_IPV6[@]})
+   POD_CIDR=(${CLUSTER_CIDR[@]})
+
+   if [ ${#CLUSTER_CIDR_IPV4[@]} -ne 0 ]; then
+      echo "${CLUSTER_CIDR_IPV4[@]}" | tr ' ' '\n' > ${WORKING_DIRECTORY}/.cluster-cidr-ipv4
+   fi
+
+   if [ ${#CLUSTER_CIDR_IPV6[@]} -ne 0 ]; then
+      echo "${CLUSTER_CIDR_IPV6[@]}" | tr ' ' '\n' > ${WORKING_DIRECTORY}/.cluster-cidr-ipv6
+   fi
+
+   if [ ${#CLUSTER_CIDR[@]} -ne 0 ]; then
+      echo "${CLUSTER_CIDR[@]}" | tr ' ' '\n' > ${WORKING_DIRECTORY}/.cluster-cidr
+   fi
+}
+
+#
+# [Note] Experimental Features.
+#
+dump_cluster_cidr_from_cilium_cm() {
+
+   CILIUM_NS=$(kubectl get cm --all-namespaces --request-timeout=8s -o custom-columns='NAMESPACE:.metadata.namespace,NAME:.metadata.name' 2>/dev/null | awk '$2 == "cilium-config" {print $1}')
+
+   if [ -z "${CILIUM_NS}" ]; then
+      echo '[Info] Cilium plugin is not found.'
+      return
+   fi
+
+   CLUSTER_CIDR_IPV4=($(kubectl -n ${CILIUM_NS} get cm cilium-config -o json 2>/dev/null | jq -r '.data."cluster-pool-ipv4-cidr"'))
+   CLUSTER_CIDR_IPV6=($(kubectl -n ${CILIUM_NS} get cm cilium-config -o json 2>/dev/null | jq -r '.data."cluster-pool-ipv6-cidr"'))
+   CLUSTER_CIDR=(${CLUSTER_CIDR_IPV4[@]} ${CLUSTER_CIDR_IPV6[@]})
+
+   echo '[Info] K8s cluster CIDRs are as below:'
+   echo "${CLUSTER_CIDR[@]}" | tr ' ' '\n' | sed 's#^#   #g'
+
+   # The alternative variable names, compatible with other situations
+   POD_CIDR_IPV4=(${CLUSTER_CIDR_IPV4[@]})
+   POD_CIDR_IPV6=(${CLUSTER_CIDR_IPV6[@]})
+   POD_CIDR=(${CLUSTER_CIDR[@]})
+
+   if [ ${#CLUSTER_CIDR_IPV4[@]} -ne 0 ]; then
+      echo "${CLUSTER_CIDR_IPV4[@]}" | tr ' ' '\n' > ${WORKING_DIRECTORY}/.cluster-cidr-ipv4
+   fi
+
+   if [ ${#CLUSTER_CIDR_IPV6[@]} -ne 0 ]; then
+      echo "${CLUSTER_CIDR_IPV6[@]}" | tr ' ' '\n' > ${WORKING_DIRECTORY}/.cluster-cidr-ipv6
+   fi
+
+   if [ ${#CLUSTER_CIDR[@]} -ne 0 ]; then
+      echo "${CLUSTER_CIDR[@]}" | tr ' ' '\n' > ${WORKING_DIRECTORY}/.cluster-cidr
+   fi
+}
+
+#
+# [Note] Experimental Features.
+#
+dump_cluster_cidr_from_weave_cm() {
+
+   WEAVE_NS=$(kubectl get cm --all-namespaces --request-timeout=8s -o custom-columns='NAMESPACE:.metadata.namespace,NAME:.metadata.name' 2>/dev/null | awk '$2 == "weave-net" {print $1}')
+
+   if [ -z "${WEAVE_NS}" ]; then
+      echo '[Info] Weave plugin is not found.'
+      return
+   fi
+
+   CLUSTER_CIDR_IPV4=($(kubectl -n ${WEAVE_NS} get configmap weave-net -o json 2>/dev/null | jq -r '.data."weave_cidr"'))
+   CLUSTER_CIDR_IPV6=($(kubectl -n ${WEAVE_NS} get configmap weave-net -o json 2>/dev/null | jq -r '.data."weave_cidr"'))
+
+}
+
+#
 # [Note] Dump the K8s cluster/pods CIDRs from calico daemonset resource manifest. K8s Cluster/Pods CIDR. You can obtain this value from ippools, the apiserver process or kube-proxy process. I'm not entirely sure if this is an effective and stable way to obtain it. The approximate specification of this parameter is --cluster-cidr=197.166.0.0/16,fd00:c5a6::/106.
 #
 dump_cluster_cidr_from_calico_ds() {

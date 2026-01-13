@@ -375,7 +375,7 @@ load_system_service_unit_file_path() {
 
    if [ -z "${SYSTEM_SERVICE_UNIT_FILE_PATH}" ]; then
       SYSTEM_SERVICE_UNIT_FILE_PATH=$(dirname $(systemctl show sysinit.target --property=FragmentPath | sed 's#FragmentPath=##g'))
-   done
+   fi
 
    echo "[Info] The system service unit file path: ${SYSTEM_SERVICE_UNIT_FILE_PATH}"
 }
