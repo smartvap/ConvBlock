@@ -803,6 +803,25 @@ get_external_interfaces() {
    done
 }
 
+load_system_service_unit_file_path() {
+
+   SYSTEM_SERVICE_UNIT_FILE_PATH=$(pkg-config systemd --variable=systemdsystemunitdir)
+
+   if [ -z "${SYSTEM_SERVICE_UNIT_FILE_PATH}" ]; then
+      for i in $(systemctl show --property=UnitPath --no-page | sed 's#UnitPath=##g' | tr ' ' '\n'); do
+         if [[ ! "$i" =~ "/run" ]] && [ -d "$i" ]; then
+            SYSTEM_SERVICE_UNIT_FILE_PATH="$i"
+         fi
+      done
+   fi
+
+   if [ -z "${SYSTEM_SERVICE_UNIT_FILE_PATH}" ]; then
+      SYSTEM_SERVICE_UNIT_FILE_PATH=$(dirname $(systemctl show sysinit.target --property=FragmentPath | sed 's#FragmentPath=##g'))
+   fi
+
+   echo "[Info] The system service unit file path: ${SYSTEM_SERVICE_UNIT_FILE_PATH}"
+}
+
 #
 # [Note] A example of .secondary-addresses is : [{"bond0":["134.84.62.35/24","134.84.62.36/24","134.84.62.37/24","134.84.62.38/24","134.84.62.39/24"]}], don't forget to add the mask.
 # Use this command to modify this config file: echo '[{"bond0":["134.84.62.35/24","134.84.62.36/24","134.84.62.37/24","134.84.62.38/24","134.84.62.39/24"]}]' | jq -r . | tee .secondary-addresses
@@ -855,6 +874,73 @@ del_secondary_addresses() {
    done
 }
 
+enable_secondary_ip_addresses_timer() {
+
+   local currentRealPath=$(realpath $0)
+   local templateServicePath=${WORKING_DIRECTORY}/auto-configure-template.service
+   local templateTimerPath=${WORKING_DIRECTORY}/auto-configure-template.timer
+
+   if [ ! -f "$templateServicePath" ] || [ ! -f "$templateTimerPath" ]; then
+      echo "[Warn] The corresponding template file is missing: $templateServicePath or $templateTimerPath"
+      exit -1
+   fi
+
+   load_system_service_unit_file_path
+
+   if [ -z "${SYSTEM_SERVICE_UNIT_FILE_PATH}" ]; then
+      echo '[Warn] Failed to obtain system service unit file path.'
+      exit -1
+   fi
+
+   local targetServicePath=${SYSTEM_SERVICE_UNIT_FILE_PATH}/auto-configure-secondary-ip-addresses.service
+   local targetTimerPath=${SYSTEM_SERVICE_UNIT_FILE_PATH}/auto-configure-secondary-ip-addresses.timer
+
+   /usr/bin/cp -f $templateServicePath $targetServicePath
+   /usr/bin/cp -f $templateTimerPath $targetTimerPath
+
+   python3 ${WORKING_DIRECTORY}/ini-util.py --write $targetServicePath Unit Description "Auto configure secondary IP addresses"
+   python3 ${WORKING_DIRECTORY}/ini-util.py --write $targetServicePath Service ExecStart "/bin/bash $currentRealPath --add-secondary-addresses"
+   python3 ${WORKING_DIRECTORY}/ini-util.py --write $targetTimerPath Unit Description "Auto configure secondary IP addresses"
+   python3 ${WORKING_DIRECTORY}/ini-util.py --write $targetTimerPath Unit Requires "$(basename $targetServicePath)"
+
+   systemctl daemon-reload
+   systemctl enable $(basename $targetServicePath) --now
+   systemctl enable $(basename $targetTimerPath) --now
+
+   echo
+   systemctl status $(basename $targetServicePath)
+
+   echo
+   systemctl status $(basename $targetTimerPath)
+
+   echo
+   systemctl list-timers --all --no-page
+}
+
+disable_secondary_ip_addresses_timer() {
+
+   load_system_service_unit_file_path
+
+   if [ -z "${SYSTEM_SERVICE_UNIT_FILE_PATH}" ]; then
+      echo '[Warn] Failed to obtain system service unit file path.'
+      exit -1
+   fi
+
+   local targetServicePath=${SYSTEM_SERVICE_UNIT_FILE_PATH}/auto-configure-secondary-ip-addresses.service
+   local targetTimerPath=${SYSTEM_SERVICE_UNIT_FILE_PATH}/auto-configure-secondary-ip-addresses.timer
+
+   systemctl disable $(basename $targetServicePath) --now
+   systemctl disable $(basename $targetTimerPath) --now
+
+   /usr/bin/rm -f $targetServicePath
+   /usr/bin/rm -f $targetTimerPath
+
+   echo "[Info] Both $targetServicePath and $targetTimerPath are disabled and removed."
+
+   echo
+   systemctl list-timers --all --no-page
+}
+
 orderedPara=(
    "--standardize-ip-address"
    "--standardize-ip-addresses"
@@ -878,6 +964,8 @@ orderedPara=(
    "--get-external-interfaces"
    "--add-secondary-addresses"
    "--del-secondary-addresses"
+   "--enable-secondary-ip-addresses-timer"
+   "--disable-secondary-ip-addresses-timer"
    "--usage"
 )
 
@@ -904,6 +992,8 @@ declare -A mapParaFunc=(
    ["--get-external-interfaces"]="get_external_interfaces"
    ["--add-secondary-addresses"]="add_secondary_addresses"
    ["--del-secondary-addresses"]="del_secondary_addresses"
+   ["--enable-secondary-ip-addresses-timer"]="enable_secondary_ip_addresses_timer"
+   ["--disable-secondary-ip-addresses-timer"]="disable_secondary_ip_addresses_timer"
    ["--usage"]="usage"
 )
 
@@ -930,6 +1020,8 @@ declare -A mapParaSpec=(
    ["--get-external-interfaces"]="Save the business data network card (usually an external network adapter) to .external-interfaces file."
    ["--add-secondary-addresses"]="Add secondary addresses based on the configuration data in the file .secondary-addresses."
    ["--del-secondary-addresses"]="Remove secondary addresses based on the configuration data in the file .secondary-addresses."
+   ["--enable-secondary-ip-addresses-timer"]="Enable the secondary IP addresses activation timer, to achieve active recovery after device restart or human modification."
+   ["--disable-secondary-ip-addresses-timer"]="Disable the secondary IP addresses activation timer."
    ["--usage"]="Operation Manual."
 )
 

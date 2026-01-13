@@ -1,0 +1,15 @@
+[Unit]
+Description=Refresh Secondary IP Addresses
+After=network.target
+
+[Service]
+Type=oneshot
+ExecStart=/data/labs/ConvBlock/network-utilities.sh --add-secondary-addresses
+User=root
+Environment=PATH=/usr/sbin:/usr/bin
+StandardOutput=journal
+StandardError=journal
+Restart=no
+
+[Install]
+WantedBy=multi-user.target

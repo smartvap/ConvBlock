@@ -1,0 +1,13 @@
+[Unit]
+Description=
+Requires=
+
+[Timer]
+OnCalendar=*-*-* 00/1:00:00
+OnBootSec=5min
+AccuracySec=1m
+Persistent=true
+RandomizedDelaySec=30s  # Randomly delay 0-30 seconds to avoid multiple hosts executing at the same time
+
+[Install]
+WantedBy=timers.target

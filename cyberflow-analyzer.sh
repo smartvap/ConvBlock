@@ -20,7 +20,7 @@
 
 # [1] There is a case where port forwarding is configured on iptables, but the listening port on the current node cannot be seen through netstat. [Done]
 # [2] Analyzing processes of each listening port. [Done]
-# [3] When the container on the current node accesses open services on the current node, due to the dynamic nature of the container IP, the address segments of the container network, such as the bip address segment and all address segments under the Docker network, such as the kube apiserver service port, should be released. This function is not universal, therefore it is not included as a regular function.
+# [3] When the container on the current node accesses open services on the current node, due to the dynamic nature of the container IP, the address segments of the container network, such as the bip address segment and all address segments under the Docker network, such as the kube apiserver service port, should be released. This function is not universal, therefore it is not included as a regular function. [Done]
 # [4] The intercepted request can be correctly identified and the connection failure caused by security protection can be found in time.
 # [5] Iptables automatically takes effect after the host is restarted.
 # [6] Add manually backup functions.
@@ -42,6 +42,7 @@
 # [22] A specialized processing mode for FTP protocol, with the target end being a dynamically open listening port.
 # [23] Large scale cluster with multiple nodes for unified scheduling.
 # [24] Remote batch push
+# [25] 允许在历史连接摘要表的基础上进行策略更新，允许多次短时数据包捕获，同时允许对长期不活跃的连接策略予以回收。
 
 #########################################
 # Verifications                         #
@@ -237,6 +238,11 @@ MAX_JOBS=36
 LEGACY_SSHD_ORIGINAL_PORT=22
 
 #
+# 8. The system service unit file path
+#
+SYSTEM_SERVICE_UNIT_FILE_PATH=
+
+#
 # [Note] A list of Container Network Interface (CNI) plugins. Simply put, its main function is to provide a collection of common options for networking solutions for Kubernetes clusters.
 #
 CNI_TYPES=(
@@ -354,6 +360,26 @@ load_k8s_nodes_ip_addresses_from_file() {
    K8S_NODES_IPV4_SUBNETS=($(cat ${WORKING_DIRECTORY}/.k8s-nodes-ipv4-subnets 2>/dev/null))
    K8S_NODES_IPV6_SUBNETS=($(cat ${WORKING_DIRECTORY}/.k8s-nodes-ipv6-subnets 2>/dev/null))
 }
+
+load_system_service_unit_file_path() {
+
+   SYSTEM_SERVICE_UNIT_FILE_PATH=$(pkg-config systemd --variable=systemdsystemunitdir)
+
+   if [ -z "${SYSTEM_SERVICE_UNIT_FILE_PATH}" ]; then
+      for i in $(systemctl show --property=UnitPath --no-page | sed 's#UnitPath=##g' | tr ' ' '\n'); do
+         if [[ ! "$i" =~ "/run" ]] && [ -d "$i" ]; then
+            SYSTEM_SERVICE_UNIT_FILE_PATH="$i"
+         fi
+      done
+   fi
+
+   if [ -z "${SYSTEM_SERVICE_UNIT_FILE_PATH}" ]; then
+      SYSTEM_SERVICE_UNIT_FILE_PATH=$(dirname $(systemctl show sysinit.target --property=FragmentPath | sed 's#FragmentPath=##g'))
+   done
+
+   echo "[Info] The system service unit file path: ${SYSTEM_SERVICE_UNIT_FILE_PATH}"
+}
+
 
 #########################################
 # Common Utilities                      #
@@ -2463,6 +2489,7 @@ capture_non_tcp_udp_packets() {
 capture_invalid_rst_packets() {
    tcpdump -i any -nn 'tcp[tcpflags] & tcp-rst != 0'
 }
+
 
 orderedPara=(
    "--batch-remote-deliver"
