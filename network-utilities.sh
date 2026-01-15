@@ -9,7 +9,7 @@
 #########################################
 
 # Make sure the alias is available in this shell script
-# Sometimes, some key commands need to be provided using aliases
+# Sometimes, some key commands need to be provided using aliases to overload related instructions, such as docker, podman, kubectl.
 # [Fixed] Sometimes the alias were defined in /etc/profile
 shopt -s expand_aliases
 
@@ -159,7 +159,7 @@ is_subnet_contained() {
 }
 
 #
-# [Note] Obtain docker subnet addresses. These docker subnets are created by `docker network create` or docker-compose.
+# [Note] Obtain docker subnet addresses. These docker subnets are created by `docker network create` or docker-compose projects.
 #
 get_docker_subnet_addresses() {
 
@@ -523,6 +523,9 @@ get_cluster_cidr() {
    fi
 }
 
+#
+# [Note] Need to execute on the master node
+#
 dump_service_cidr_from_controller_manager() {
 
    SERVICE_CIDR_IPV4=()
@@ -555,6 +558,9 @@ dump_service_cidr_from_controller_manager() {
    fi
 }
 
+#
+# [Note] Need to execute on the master node
+#
 dump_service_cidr_from_kube_apiserver() {
 
    SERVICE_CIDR_IPV4=()
@@ -587,6 +593,116 @@ dump_service_cidr_from_kube_apiserver() {
    fi
 }
 
+#
+# [Note] Need to execute on the master node
+#
+dump_service_cidr_from_coredns() {
+   :
+}
+
+#
+# [Note] Check if the current K8s cluster has enabled ipvs mode, otherwise it is iptables mode
+#
+is_ipvs_enabled() {
+
+   local proxyMode=$(ps -ef | grep kube-proxy | grep '\--proxy-mode' | sed 's#.*--proxy-mode=\([^ ]*\).*#\1#g')
+
+   if [ ! -z "$proxyMode" ] && [ "$proxyMode" == "ipvs" ]; then
+      echo 'true'
+   else
+      echo 'false'
+   fi
+}
+
+#
+# [Note] Support running on both masters and workers
+#
+get_kube_service_ranges() {
+
+   KUBE_SERVICE_IPV4_RANGES=()
+   KUBE_SERVICE_IPV6_RANGES=()
+
+   local i=
+   local ipv4Range=
+   local ipv6Range=
+
+   # In ipvs mode, the service list on the current node can be obtained using the ipvsadm tool or by viewing the additional addresses of the kube-ipvs* virtual network interfaces
+   if $(is_ipvs_enabled); then
+
+      for i in $(ip link show | awk '$2 ~ "kube-ipvs" {print $2}' | sed 's#:##g'); do
+         ipv4Range=$(ip a show dev $i | grep -w 'inet' | sed 's#.*inet \([^ ]*\).*#\1#g' | awk -F'[.|/]' '{print $1,$2,$3,$4}' | sort -nk3,4 | awk '{print $1"."$2"."$3"."$4}' | sed -n '1p;$p' | paste -s -d '-')
+         KUBE_SERVICE_IPV4_RANGES=(${KUBE_SERVICE_IPV4_RANGES[@]} $ipv4Range)
+
+         ipv6Range=$(ip a show dev $i | grep -w 'inet6' | sed 's#.*inet6 \([^ ]*\).*#\1#g' | sort -u | sed -n '1p;$p' | paste -s -d '-')
+         KUBE_SERVICE_IPV6_RANGES=(${KUBE_SERVICE_IPV6_RANGES[@]} $ipv6Range)
+      done
+   else
+
+      ipv4Range=$(iptables -t nat -S KUBE-SERVICES -w | grep -w '\-d' | sed 's#.*-d \([^ ]*\).*#\1#g' | awk -F'[.|/]' '{print $1,$2,$3,$4}' | sort -nk3,4 | awk '{print $1"."$2"."$3"."$4}' | sed -n '1p;$p' | paste -s -d '-')
+      KUBE_SERVICE_IPV4_RANGES=(${KUBE_SERVICE_IPV4_RANGES[@]} $ipv4Range)
+
+      ipv6Range=$(ip6tables -t nat -S KUBE-SERVICES -w | grep -w '\-d' | sed 's#.*-d \([^ ]*\).*#\1#g' | sort -u | sed -n '1p;$p' | paste -s -d '-')
+      KUBE_SERVICE_IPV6_RANGES=(${KUBE_SERVICE_IPV6_RANGES[@]} $ipv6Range)
+   fi
+
+   echo '[Info] The kubernetes service IP ranges are as below:'
+   echo ${KUBE_SERVICE_IPV4_RANGES[@]} | tr ' ' '\n' | sed 's#^#   #g'
+   echo ${KUBE_SERVICE_IPV6_RANGES[@]} | tr ' ' '\n' | sed 's#^#   #g'
+}
+
+#
+# [Note] Support execution on all nodes in the K8s cluster, including master and worker
+#
+dump_service_cidr_from_service_list() {
+
+   SERVICE_CIDR_IPV4=()
+   SERVICE_CIDR_IPV6=()
+   SERVICE_CIDR=()
+
+   get_kube_service_ranges
+
+   local ipv4Range=
+   local ipv6Range=
+   local ipv4Cdir=
+   local ipv6Cdir=
+
+   if [ ${#KUBE_SERVICE_IPV4_RANGES[@]} -ne 0 ]; then
+      
+      for ipv4Range in ${KUBE_SERVICE_IPV4_RANGES[@]}; do
+         ipv4Cdir=$(python3 ${WORKING_DIRECTORY}/minimum-subnet-closure.py $(echo "$ipv4Range" | tr '-' ' '))
+         SERVICE_CIDR_IPV4=(${SERVICE_CIDR_IPV4[@]} $ipv4Cdir)
+      done
+   fi
+
+   if [ ${#KUBE_SERVICE_IPV6_RANGES[@]} -ne 0 ]; then
+
+      for ipv6Range in ${KUBE_SERVICE_IPV6_RANGES[@]}; do
+         ipv6Cdir=$(python3 ${WORKING_DIRECTORY}/minimum-subnet-closure.py $(echo "$ipv6Range" | tr '-' ' '))
+         SERVICE_CIDR_IPV6=(${SERVICE_CIDR_IPV6[@]} $ipv6Cdir)
+      done
+   fi
+
+   SERVICE_CIDR=(${SERVICE_CIDR_IPV4[@]} ${SERVICE_CIDR_IPV6[@]})
+
+   echo '[Info] The kubernetes service CIDR are as below:'
+   echo "${SERVICE_CIDR[@]}" | tr ' ' '\n' | sed 's#^#   #g'
+
+   if [ ${#SERVICE_CIDR_IPV4[@]} -ne 0 ]; then
+      echo "${SERVICE_CIDR_IPV4[@]}" | tr ' ' '\n' > ${WORKING_DIRECTORY}/.service-cidr-ipv4
+   fi
+
+   if [ ${#SERVICE_CIDR_IPV6[@]} -ne 0 ]; then
+      echo "${SERVICE_CIDR_IPV6[@]}" | tr ' ' '\n' | tee ${WORKING_DIRECTORY}/.service-cidr-ipv6
+   fi
+
+   if [ ${#SERVICE_CIDR[@]} -ne 0 ]; then
+      echo "${SERVICE_CIDR[@]}" | tr ' ' '\n' | tee ${WORKING_DIRECTORY}/.service-cidr
+   fi
+}
+
+#
+# [Note] Only supports running on K8s Master nodes
+#
 get_service_cidr() {
 
    SERVICE_CIDR_IPV4=($(cat ${WORKING_DIRECTORY}/.service-cidr-ipv4 2>/dev/null))
@@ -943,7 +1059,7 @@ get_external_interfaces() {
    local ipv4Addresses=()
    local ipv6Addresses=()
 
-   for ifName in $(ip link show | awk -F': ' '/^[0-9]+: / {print $2}' | grep -vE '^lo$|^vmnet|^virbr|^br|^tun|^tap|^veth|^docker|^vnet|^cali|^flannel|^vxlan|^kube-ipvs|^dummy'); do
+   for ifName in $(ip link show | awk -F': ' '/^[0-9]+: / {print $2}' | grep -vE '^lo$|^vmnet|^virbr|^br|^tun|^tap|^veth|^docker|^vnet|^cali|^flannel|^vxlan|^kube-ipvs|^dummy|weave|canal|cilium'); do
 
       ipv4Addresses=($(ip -4 addr show dev "$ifName" 2>/dev/null | grep inet | awk '{print $2}'))
       # Check IPv6 address (global unicast address)
@@ -954,6 +1070,117 @@ get_external_interfaces() {
          echo $ifName | tee -a ${WORKING_DIRECTORY}/.external-interfaces
       fi
    done
+}
+
+get_default_route_interfaces() {
+   
+   DEFAULT_IPV4_ROUTE_INTERFACES=($(ip route | awk '$1 == "default" {print $5}'))
+   DEFAULT_IPV6_ROUTE_INTERFACES=($(ip -6 route | awk '$1 == "default" {print $5}'))
+   DEFAULT_ROUTE_INTERFACES=(${DEFAULT_IPV4_ROUTE_INTERFACES[@]} ${DEFAULT_IPV6_ROUTE_INTERFACES[@]})
+
+   # Usually, the network interfaces for default routing IPv4 and IPv6 addresses overlap, so it is necessary to eliminate duplicates and avoid reordering.
+   DEFAULT_ROUTE_INTERFACES=($(echo ${DEFAULT_ROUTE_INTERFACES[@]} | tr ' ' '\n' | awk '!seen[$0]++'))
+
+   if [ ${#DEFAULT_IPV4_ROUTE_INTERFACES[@]} -ne 0 ]; then
+      echo "${DEFAULT_IPV4_ROUTE_INTERFACES[@]}" | tr ' ' '\n' > ${WORKING_DIRECTORY}/.default-ipv4-route-interfaces
+   fi
+
+   if [ ${#DEFAULT_IPV6_ROUTE_INTERFACES[@]} -ne 0 ]; then
+      echo "${DEFAULT_IPV6_ROUTE_INTERFACES[@]}" | tr ' ' '\n' > ${WORKING_DIRECTORY}/.default-ipv6-route-interfaces
+   fi
+
+   if [ ${#DEFAULT_ROUTE_INTERFACES[@]} -ne 0 ]; then
+      echo "${DEFAULT_ROUTE_INTERFACES[@]}" | tr ' ' '\n' > ${WORKING_DIRECTORY}/.default-route-interfaces
+   fi
+
+   echo '[Info] Default IPv4/6 routing interfaces are as below:'
+   echo "${DEFAULT_ROUTE_INTERFACES[@]}" | tr ' ' '\n' | sed 's#^#   #g'
+}
+
+get_default_route_ip_addresses() {
+   
+   get_default_route_interfaces
+
+   DEFAULT_IPV4_ROUTE_ADDRESSES=()
+   DEFAULT_IPV6_ROUTE_ADDRESSES=()
+   DEFAULT_ROUTE_ADDRESSES=()
+
+   local ipList=()
+
+   if [ ${#DEFAULT_IPV4_ROUTE_INTERFACES[@]} -ne 0 ]; then
+      for i in ${DEFAULT_IPV4_ROUTE_INTERFACES[@]}; do
+         ipList=($(ip a show dev $i | grep -w 'inet' | sed 's#.*inet \([^/]*\).*#\1#g'))
+         DEFAULT_IPV4_ROUTE_ADDRESSES=(${DEFAULT_IPV4_ROUTE_ADDRESSES[@]} ${ipList[@]})
+      done
+   fi
+
+   if [ ${#DEFAULT_IPV6_ROUTE_INTERFACES[@]} -ne 0 ]; then
+      for i in ${DEFAULT_IPV6_ROUTE_INTERFACES[@]}; do
+         ipList=($(ip -6 a show dev $i | grep -w 'inet6' | sed 's#.*inet6 \([^/]*\).*#\1#g' | grep -v -i '^fe80:'))
+         DEFAULT_IPV6_ROUTE_ADDRESSES=(${DEFAULT_IPV6_ROUTE_ADDRESSES[@]} ${ipList[@]})
+      done
+   fi
+
+   DEFAULT_ROUTE_ADDRESSES=(${DEFAULT_IPV4_ROUTE_ADDRESSES[@]} ${DEFAULT_IPV6_ROUTE_ADDRESSES[@]})
+
+   if [ ${#DEFAULT_IPV4_ROUTE_ADDRESSES[@]} -ne 0 ]; then
+      echo "${DEFAULT_IPV4_ROUTE_ADDRESSES[@]}" | tr ' ' '\n' > ${WORKING_DIRECTORY}/.default-ipv4-route-addresses
+   fi
+
+   if [ ${#DEFAULT_IPV6_ROUTE_ADDRESSES[@]} -ne 0 ]; then
+      echo "${DEFAULT_IPV6_ROUTE_ADDRESSES[@]}" | tr ' ' '\n' > ${WORKING_DIRECTORY}/.default-ipv6-route-addresses
+   fi
+
+   if [ ${#DEFAULT_ROUTE_ADDRESSES[@]} -ne 0 ]; then
+      echo "${DEFAULT_ROUTE_ADDRESSES[@]}" | tr ' ' '\n' > ${WORKING_DIRECTORY}/.default-route-addresses
+   fi
+
+   echo '[Info] IPv4/6 addresses of default routing interfaces are as below:'
+   echo "${DEFAULT_ROUTE_ADDRESSES[@]}" | tr ' ' '\n' | sed 's#^#   #g'
+}
+
+get_default_route_subnets() {
+   
+   get_default_route_interfaces
+
+   DEFAULT_IPV4_ROUTE_SUBNETS=()
+   DEFAULT_IPV6_ROUTE_SUBNETS=()
+   DEFAULT_ROUTE_SUBNETS=()
+
+   local subnets=()
+
+   if [ ${#DEFAULT_IPV4_ROUTE_INTERFACES[@]} -ne 0 ]; then
+      for i in ${DEFAULT_IPV4_ROUTE_INTERFACES[@]}; do
+         subnets=($(ip a show dev $i | grep -w 'inet' | sed 's#.*inet \([^ ]*\).*#\1#g'))
+         subnets=($(standardize_ip_addresses "${subnets[@]}"))
+         DEFAULT_IPV4_ROUTE_SUBNETS=(${DEFAULT_IPV4_ROUTE_SUBNETS[@]} ${subnets[@]})
+      done
+   fi
+
+   if [ ${#DEFAULT_IPV6_ROUTE_INTERFACES[@]} -ne 0 ]; then
+      for i in ${DEFAULT_IPV6_ROUTE_INTERFACES[@]}; do
+         subnets=($(ip -6 a show dev $i | grep -w 'inet6' | sed 's#.*inet6 \([^ ]*\).*#\1#g' | grep -v -i '^fe80:'))
+         subnets=($(standardize_ip_addresses "${subnets[@]}"))
+         DEFAULT_IPV6_ROUTE_SUBNETS=(${DEFAULT_IPV6_ROUTE_SUBNETS[@]} ${subnets[@]})
+      done
+   fi
+
+   DEFAULT_ROUTE_SUBNETS=(${DEFAULT_IPV4_ROUTE_SUBNETS[@]} ${DEFAULT_IPV6_ROUTE_SUBNETS[@]})
+
+   if [ ${#DEFAULT_IPV4_ROUTE_SUBNETS[@]} -ne 0 ]; then
+      echo "${DEFAULT_IPV4_ROUTE_SUBNETS[@]}" | tr ' ' '\n' > ${WORKING_DIRECTORY}/.default-ipv4-route-subnets
+   fi
+
+   if [ ${#DEFAULT_IPV6_ROUTE_SUBNETS[@]} -ne 0 ]; then
+      echo "${DEFAULT_IPV6_ROUTE_SUBNETS[@]}" | tr ' ' '\n' > ${WORKING_DIRECTORY}/.default-ipv6-route-subnets
+   fi
+
+   if [ ${#DEFAULT_ROUTE_SUBNETS[@]} -ne 0 ]; then
+      echo "${DEFAULT_ROUTE_SUBNETS[@]}" | tr ' ' '\n' > ${WORKING_DIRECTORY}/.default-route-subnets
+   fi
+
+   echo '[Info] IPv4/6 subnets of default routing interfaces are as below:'
+   echo "${DEFAULT_ROUTE_SUBNETS[@]}" | tr ' ' '\n' | sed 's#^#   #g'
 }
 
 load_system_service_unit_file_path() {
@@ -1107,6 +1334,7 @@ orderedPara=(
    "--get-cluster-cidr"
    "--dump-service-cidr-from-controller-manager"
    "--dump-service-cidr-from-kube-apiserver"
+   "--dump-service-cidr-from-service-list"
    "--get-service-cidr"
    "--get-k8s-nodes-ip-addresses"
    "--get-kvm-subnet-addresses"
@@ -1115,6 +1343,7 @@ orderedPara=(
    "--get-additional-ip-addresses"
    "--get-current-ip-environment"
    "--get-external-interfaces"
+   "--get-default-route-ip-addresses"
    "--add-secondary-addresses"
    "--del-secondary-addresses"
    "--enable-secondary-ip-addresses-timer"
@@ -1135,6 +1364,7 @@ declare -A mapParaFunc=(
    ["--get-cluster-cidr"]="get_cluster_cidr"
    ["--dump-service-cidr-from-controller-manager"]="dump_service_cidr_from_controller_manager"
    ["--dump-service-cidr-from-kube-apiserver"]="dump_service_cidr_from_kube_apiserver"
+   ["--dump-service-cidr-from-service-list"]="dump_service_cidr_from_service_list"
    ["--get-service-cidr"]="get_service_cidr"
    ["--get-k8s-nodes-ip-addresses"]="get_k8s_nodes_ip_addresses"
    ["--get-kvm-subnet-addresses"]="get_kvm_subnet_addresses"
@@ -1143,6 +1373,7 @@ declare -A mapParaFunc=(
    ["--get-additional-ip-addresses"]="get_additional_ip_addresses"
    ["--get-current-ip-environment"]="get_current_ip_environment"
    ["--get-external-interfaces"]="get_external_interfaces"
+   ["--get-default-route-ip-addresses"]="get_default_route_ip_addresses"
    ["--add-secondary-addresses"]="add_secondary_addresses"
    ["--del-secondary-addresses"]="del_secondary_addresses"
    ["--enable-secondary-ip-addresses-timer"]="enable_secondary_ip_addresses_timer"
@@ -1163,6 +1394,7 @@ declare -A mapParaSpec=(
    ["--get-cluster-cidr"]="Save K8s cluster CIDRs / pods CIDRs into hidden files, we will try the four methods mentioned above one by one and guide you to find the effective one."
    ["--dump-service-cidr-from-controller-manager"]="Get K8s service CIDRs from kube-controller-manager parameters, and save to hidden files."
    ["--dump-service-cidr-from-kube-apiserver"]="Get K8s service CIDRs from kube-apiserver parameters, and save to hidden files."
+   ["--dump-service-cidr-from-service-list"]="Retrieve K8s service CIDR from any node, independent of the functionality of the master node."
    ["--get-service-cidr"]="Save K8s service CIDRs into hidden files, we will try the 2 methods mentioned above one by one and guide you to find the effective one."
    ["--get-k8s-nodes-ip-addresses"]="Load real IP of K8s nodes, and save in a hidden file."
    ["--get-kvm-subnet-addresses"]="Save subnets of KVM virtual network interfaces into a hidden file."
@@ -1171,6 +1403,7 @@ declare -A mapParaSpec=(
    ["--get-additional-ip-addresses"]="Save all additional IP addresses to a specified hidden file: .additional-ip"
    ["--get-current-ip-environment"]="Save CURRENT_IP environment variable to .env file."
    ["--get-external-interfaces"]="Save the business data network card (usually an external network adapter) to .external-interfaces file."
+   ["--get-default-route-ip-addresses"]="Obtain IPv4/6 addresses of default route interfaces."
    ["--add-secondary-addresses"]="Add secondary addresses based on the configuration data in the file .secondary-addresses."
    ["--del-secondary-addresses"]="Remove secondary addresses based on the configuration data in the file .secondary-addresses."
    ["--enable-secondary-ip-addresses-timer"]="Enable the secondary IP addresses activation timer, to achieve active recovery after device restart or human modification."

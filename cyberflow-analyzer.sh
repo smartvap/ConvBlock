@@ -294,7 +294,7 @@ load_external_ip_addresses_from_file() {
 
 load_docker_subnet_addresses_from_file() {
 
-   if [ ! -f ${WORKING_DIRECTORY}/.docker-networks ]; then
+   if [ ! -f ${WORKING_DIRECTORY}/.docker-networks ] || [[ "${*}" =~ "--no-cache" ]]; then
       ${WORKING_DIRECTORY}/network-utilities.sh --get-docker-subnet-addresses
    fi
 
@@ -317,7 +317,7 @@ load_cluster_cidr_from_file() {
 load_service_cidr_from_file() {
 
    if [ ! -f ${WORKING_DIRECTORY}/.service-cidr ]; then
-      ${WORKING_DIRECTORY}/network-utilities.sh --get-service-cidr
+      ${WORKING_DIRECTORY}/network-utilities.sh --dump-service-cidr-from-service-list
    fi
 
    SERVICE_CIDR=($(cat ${WORKING_DIRECTORY}/.service-cidr 2>/dev/null))
