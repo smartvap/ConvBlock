@@ -301,12 +301,15 @@ allow_access_between_compose_containers() {
 
    get_compose_project_name
 
+   # [Note] Distinguish between trusted network policies and protective policies to avoid affecting trusted network policies during maintenance operations on protective policies
+   local iptablesComment="${PROJECT_NAME} Trust Access Control"
+
    overwrite_shell_script_header ${WORKING_DIRECTORY}/.${PROJECT_NAME}-preventive-allow-script
 
    echo "ipset destroy ${PROJECT_NAME}-trust-ipv4-subnets" >> ${WORKING_DIRECTORY}/.${PROJECT_NAME}-preventive-allow-script
    echo "ipset destroy ${PROJECT_NAME}-trust-ipv6-subnets" >> ${WORKING_DIRECTORY}/.${PROJECT_NAME}-preventive-allow-script
    echo "ipset create ${PROJECT_NAME}-trust-ipv4-subnets hash:net" >> ${WORKING_DIRECTORY}/.${PROJECT_NAME}-preventive-allow-script
-   echo "ipset create ${PROJECT_NAME}-trust-ipv6-subnets hash:net" >> ${WORKING_DIRECTORY}/.${PROJECT_NAME}-preventive-allow-script
+   echo "ipset create ${PROJECT_NAME}-trust-ipv6-subnets hash:net family inet6" >> ${WORKING_DIRECTORY}/.${PROJECT_NAME}-preventive-allow-script
 
    for i in ${TRUST_IPV4_CIDRS[@]}; do
       echo "ipset add ${PROJECT_NAME}-trust-ipv4-subnets $i" >> ${WORKING_DIRECTORY}/.${PROJECT_NAME}-preventive-allow-script
@@ -316,21 +319,13 @@ allow_access_between_compose_containers() {
       echo "ipset add ${PROJECT_NAME}-trust-ipv6-subnets $i" >> ${WORKING_DIRECTORY}/.${PROJECT_NAME}-preventive-allow-script
    done
 
-   # TCP4/UDP4 OUTBOUND
-   echo "iptables -t raw -C PREROUTING -m set --match-set ${PROJECT_NAME}-trust-ipv4-subnets src -m comment --comment \"${IPTABLES_COMMENT}\" -j ACCEPT || \\" >> ${WORKING_DIRECTORY}/.${PROJECT_NAME}-preventive-allow-script
-   echo "iptables -t raw -I PREROUTING -m set --match-set ${PROJECT_NAME}-trust-ipv4-subnets src -m comment --comment \"${IPTABLES_COMMENT}\" -j ACCEPT" >> ${WORKING_DIRECTORY}/.${PROJECT_NAME}-preventive-allow-script
+   # Communications in TCP4/UDP4
+   echo "iptables -t raw -C PREROUTING -m set --match-set ${PROJECT_NAME}-trust-ipv4-subnets src -m set --match-set ${PROJECT_NAME}-trust-ipv4-subnets dst -m comment --comment \"$iptablesComment\" -j ACCEPT || \\" >> ${WORKING_DIRECTORY}/.${PROJECT_NAME}-preventive-allow-script
+   echo "iptables -t raw -I PREROUTING -m set --match-set ${PROJECT_NAME}-trust-ipv4-subnets src -m set --match-set ${PROJECT_NAME}-trust-ipv4-subnets dst -m comment --comment \"$iptablesComment\" -j ACCEPT" >> ${WORKING_DIRECTORY}/.${PROJECT_NAME}-preventive-allow-script
 
-   # TCP4/UDP4 INBOUND
-   echo "iptables -t raw -C PREROUTING -m set --match-set ${PROJECT_NAME}-trust-ipv4-subnets dst -m comment --comment \"${IPTABLES_COMMENT}\" -j ACCEPT || \\" >> ${WORKING_DIRECTORY}/.${PROJECT_NAME}-preventive-allow-script
-   echo "iptables -t raw -I PREROUTING -m set --match-set ${PROJECT_NAME}-trust-ipv4-subnets dst -m comment --comment \"${IPTABLES_COMMENT}\" -j ACCEPT" >> ${WORKING_DIRECTORY}/.${PROJECT_NAME}-preventive-allow-script
-
-   # TCP6/UDP6 OUTBOUND
-   echo "ip6tables -t raw -C PREROUTING -m set --match-set ${PROJECT_NAME}-trust-ipv6-subnets src -m comment --comment \"${IPTABLES_COMMENT}\" -j ACCEPT || \\" >> ${WORKING_DIRECTORY}/.${PROJECT_NAME}-preventive-allow-script
-   echo "ip6tables -t raw -I PREROUTING -m set --match-set ${PROJECT_NAME}-trust-ipv6-subnets src -m comment --comment \"${IPTABLES_COMMENT}\" -j ACCEPT" >> ${WORKING_DIRECTORY}/.${PROJECT_NAME}-preventive-allow-script
-
-   # TCP6/UDP6 INBOUND
-   echo "ip6tables -t raw -C PREROUTING -m set --match-set ${PROJECT_NAME}-trust-ipv6-subnets dst -m comment --comment \"${IPTABLES_COMMENT}\" -j ACCEPT || \\" >> ${WORKING_DIRECTORY}/.${PROJECT_NAME}-preventive-allow-script
-   echo "ip6tables -t raw -I PREROUTING -m set --match-set ${PROJECT_NAME}-trust-ipv6-subnets dst -m comment --comment \"${IPTABLES_COMMENT}\" -j ACCEPT" >> ${WORKING_DIRECTORY}/.${PROJECT_NAME}-preventive-allow-script
+   # Communications in TCP6/UDP6
+   echo "ip6tables -t raw -C PREROUTING -m set --match-set ${PROJECT_NAME}-trust-ipv6-subnets src -m set --match-set ${PROJECT_NAME}-trust-ipv6-subnets dst -m comment --comment \"$iptablesComment\" -j ACCEPT || \\" >> ${WORKING_DIRECTORY}/.${PROJECT_NAME}-preventive-allow-script
+   echo "ip6tables -t raw -I PREROUTING -m set --match-set ${PROJECT_NAME}-trust-ipv6-subnets src -m set --match-set ${PROJECT_NAME}-trust-ipv6-subnets dst -m comment --comment \"$iptablesComment\" -j ACCEPT" >> ${WORKING_DIRECTORY}/.${PROJECT_NAME}-preventive-allow-script
 
    echo "[Info] The preventive iptables allow rules have been saved in ${WORKING_DIRECTORY}/.${PROJECT_NAME}-preventive-allow-script"
 }
@@ -437,11 +432,11 @@ generate_port_mapping_tables() {
 #
 # [Note] After implementing this policy, the remote peer in .legacy-clients will be allowed to access the exposed ports of current docker-compose containers.
 #
-generate_iptables_allow_rules_from_legacy_clients() {
+generate_iptables_allow_rules() {
 
    local i=
 
-   if [ ! -f .legacy-clients ] || [ $(cat .legacy-clients | wc -l) -eq 0 ]; then
+   if [ ! -f ${WORKING_DIRECTORY}/.legacy-clients ] || [ $(cat .legacy-clients | wc -l) -eq 0 ]; then
       echo '[Warn] No authorized client IP has been configured yet.'
       return
    fi
@@ -450,7 +445,7 @@ generate_iptables_allow_rules_from_legacy_clients() {
    LEGACY_CLIENTS_IPV4=()
    LEGACY_CLIENTS_IPV6=()
 
-   for i in $(cat .legacy-clients); do
+   for i in $(cat ${WORKING_DIRECTORY}/.legacy-clients); do
 
       local ipFamily=$(python3 ${WORKING_DIRECTORY}/network-utilities.py --get-ip-family "$i")
       if [ "$ipFamily" == "IPv4" ]; then
@@ -462,15 +457,39 @@ generate_iptables_allow_rules_from_legacy_clients() {
       fi
    done
 
+   if [ ${#LEGACY_CLIENTS_IPV4[@]} -ne 0 ]; then
+      echo '[Info] The authorized client IPv4 addresses:'
+      echo ${LEGACY_CLIENTS_IPV4[@]} | tr ' ' '\n' | sed 's#^#   #g'
+   fi
+
+   if [ ${#LEGACY_CLIENTS_IPV6[@]} -ne 0 ]; then
+      echo '[Info] The authorized client IPv6 addresses:'
+      echo ${LEGACY_CLIENTS_IPV6[@]} | tr ' ' '\n' | sed 's#^#   #g'
+   fi
+
    # 2. Generate docker-compose port mapping tables
    generate_port_mapping_tables
 
-   # 3. Generate iptables strategies
+   # 3. Obtain docker-compose project name and iptables comments
+   get_compose_project_name
+
+   # 4. Generate iptables strategies
    overwrite_shell_script_header ${WORKING_DIRECTORY}/.${PROJECT_NAME}-allow-script
 
-   # [Note] Two conditions must be met: the number of authorized client IP addresses and the number of exposed IP ports in compose are both non-zero
-   if [ ${#LEGACY_CLIENTS_IPV4[@]} -ne 0 ] && [ ${#EXPLICIT_PORT_MAPPINGS_IPV4[@]} -ne 0 ]; then
+   # Add and remove existing iptables scripts, otherwise IPsec will be locked and cannot be deleted or rebuilt
+   echo >> ${WORKING_DIRECTORY}/.${PROJECT_NAME}-allow-script
+   echo "for i in \$(iptables -t raw -L PREROUTING -n --line-number | grep \"${PROJECT_NAME} Access Control\" | awk '{print \$1}' | sort -nr); do" >> ${WORKING_DIRECTORY}/.${PROJECT_NAME}-allow-script
+   echo "   iptables -t raw -D PREROUTING \$i" >> ${WORKING_DIRECTORY}/.${PROJECT_NAME}-allow-script
+   echo "done" >> ${WORKING_DIRECTORY}/.${PROJECT_NAME}-allow-script
+
+   echo >> ${WORKING_DIRECTORY}/.${PROJECT_NAME}-allow-script
+   echo "for i in \$(ip6tables -t raw -L PREROUTING -n --line-number | grep \"${PROJECT_NAME} Access Control\" | awk '{print \$1}' | sort -nr); do" >> ${WORKING_DIRECTORY}/.${PROJECT_NAME}-allow-script
+   echo "   ip6tables -t raw -D PREROUTING \$i" >> ${WORKING_DIRECTORY}/.${PROJECT_NAME}-allow-script
+   echo "done" >> ${WORKING_DIRECTORY}/.${PROJECT_NAME}-allow-script
+
+   if [ ${#EXPLICIT_PORT_MAPPINGS_IPV4[@]} -ne 0 ]; then
       
+      echo >> ${WORKING_DIRECTORY}/.${PROJECT_NAME}-allow-script
       echo "ipset destroy ${PROJECT_NAME}-legacy-clients-ipv4" >> ${WORKING_DIRECTORY}/.${PROJECT_NAME}-allow-script
       echo "ipset destroy ${PROJECT_NAME}-exposed-tcp4" >> ${WORKING_DIRECTORY}/.${PROJECT_NAME}-allow-script
       echo "ipset destroy ${PROJECT_NAME}-exposed-udp4" >> ${WORKING_DIRECTORY}/.${PROJECT_NAME}-allow-script
@@ -504,8 +523,9 @@ generate_iptables_allow_rules_from_legacy_clients() {
       echo "iptables -t raw -I PREROUTING -p udp -m set --match-set ${PROJECT_NAME}-legacy-clients-ipv4 src -m set --match-set ${PROJECT_NAME}-exposed-udp4 dst,dst -m comment --comment \"${IPTABLES_COMMENT}\" -j ACCEPT" >> ${WORKING_DIRECTORY}/.${PROJECT_NAME}-allow-script
    fi
 
-   if [ ${#LEGACY_CLIENTS_IPV6[@]} -ne 0 ] && [ ${#EXPLICIT_PORT_MAPPINGS_IPV6[@]} -ne 0 ]; then
+   if [ ${#EXPLICIT_PORT_MAPPINGS_IPV6[@]} -ne 0 ]; then
       
+      echo >> ${WORKING_DIRECTORY}/.${PROJECT_NAME}-allow-script
       echo "ipset destroy ${PROJECT_NAME}-legacy-clients-ipv6" >> ${WORKING_DIRECTORY}/.${PROJECT_NAME}-allow-script
       echo "ipset destroy ${PROJECT_NAME}-exposed-tcp6" >> ${WORKING_DIRECTORY}/.${PROJECT_NAME}-allow-script
       echo "ipset destroy ${PROJECT_NAME}-exposed-udp6" >> ${WORKING_DIRECTORY}/.${PROJECT_NAME}-allow-script
@@ -531,13 +551,21 @@ generate_iptables_allow_rules_from_legacy_clients() {
       done
 
       echo >> ${WORKING_DIRECTORY}/.${PROJECT_NAME}-allow-script
-      echo "iptables -t raw -C PREROUTING -p tcp -m set --match-set ${PROJECT_NAME}-legacy-clients-ipv6 src -m set --match-set ${PROJECT_NAME}-exposed-tcp6 dst,dst -m comment --comment \"${IPTABLES_COMMENT}\" -j ACCEPT || \\" >> ${WORKING_DIRECTORY}/.${PROJECT_NAME}-allow-script
-      echo "iptables -t raw -I PREROUTING -p tcp -m set --match-set ${PROJECT_NAME}-legacy-clients-ipv6 src -m set --match-set ${PROJECT_NAME}-exposed-tcp6 dst,dst -m comment --comment \"${IPTABLES_COMMENT}\" -j ACCEPT" >> ${WORKING_DIRECTORY}/.${PROJECT_NAME}-allow-script
+      echo "ip6tables -t raw -C PREROUTING -p tcp -m set --match-set ${PROJECT_NAME}-legacy-clients-ipv6 src -m set --match-set ${PROJECT_NAME}-exposed-tcp6 dst,dst -m comment --comment \"${IPTABLES_COMMENT}\" -j ACCEPT || \\" >> ${WORKING_DIRECTORY}/.${PROJECT_NAME}-allow-script
+      echo "ip6tables -t raw -I PREROUTING -p tcp -m set --match-set ${PROJECT_NAME}-legacy-clients-ipv6 src -m set --match-set ${PROJECT_NAME}-exposed-tcp6 dst,dst -m comment --comment \"${IPTABLES_COMMENT}\" -j ACCEPT" >> ${WORKING_DIRECTORY}/.${PROJECT_NAME}-allow-script
 
       echo >> ${WORKING_DIRECTORY}/.${PROJECT_NAME}-allow-script
-      echo "iptables -t raw -C PREROUTING -p udp -m set --match-set ${PROJECT_NAME}-legacy-clients-ipv6 src -m set --match-set ${PROJECT_NAME}-exposed-udp6 dst,dst -m comment --comment \"${IPTABLES_COMMENT}\" -j ACCEPT || \\" >> ${WORKING_DIRECTORY}/.${PROJECT_NAME}-allow-script
-      echo "iptables -t raw -I PREROUTING -p udp -m set --match-set ${PROJECT_NAME}-legacy-clients-ipv6 src -m set --match-set ${PROJECT_NAME}-exposed-udp6 dst,dst -m comment --comment \"${IPTABLES_COMMENT}\" -j ACCEPT" >> ${WORKING_DIRECTORY}/.${PROJECT_NAME}-allow-script
+      echo "ip6tables -t raw -C PREROUTING -p udp -m set --match-set ${PROJECT_NAME}-legacy-clients-ipv6 src -m set --match-set ${PROJECT_NAME}-exposed-udp6 dst,dst -m comment --comment \"${IPTABLES_COMMENT}\" -j ACCEPT || \\" >> ${WORKING_DIRECTORY}/.${PROJECT_NAME}-allow-script
+      echo "ip6tables -t raw -I PREROUTING -p udp -m set --match-set ${PROJECT_NAME}-legacy-clients-ipv6 src -m set --match-set ${PROJECT_NAME}-exposed-udp6 dst,dst -m comment --comment \"${IPTABLES_COMMENT}\" -j ACCEPT" >> ${WORKING_DIRECTORY}/.${PROJECT_NAME}-allow-script
    fi
+
+   # The query script
+   echo >> ${WORKING_DIRECTORY}/.${PROJECT_NAME}-allow-script
+   echo "iptables -t raw -L PREROUTING -n --line-number | grep \"${PROJECT_NAME} Access Control\"" >> ${WORKING_DIRECTORY}/.${PROJECT_NAME}-allow-script
+   echo "ip6tables -t raw -L PREROUTING -n --line-number | grep \"${PROJECT_NAME} Access Control\"" >> ${WORKING_DIRECTORY}/.${PROJECT_NAME}-allow-script
+
+   # Convert multiple consecutive blank lines into one blank line
+   sed -i '/^$/N;/^\n$/D' ${WORKING_DIRECTORY}/.${PROJECT_NAME}-allow-script
 
    echo "[Info] The iptables allow rules have been saved in ${WORKING_DIRECTORY}/.${PROJECT_NAME}-allow-script"
 }
@@ -545,83 +573,62 @@ generate_iptables_allow_rules_from_legacy_clients() {
 #
 # [Note] Generate iptables blocking strategy scripts based on port exposure surface file. This function uses ipset to improve performance.
 #
-get_iptables_reject_rules_from_exposures() {
+generate_iptables_reject_rules() {
 
-   local IFS=$'\n'
-   local i=
+   generate_port_mapping_tables
 
-   if [ -f ${WORKING_DIRECTORY}/.tcp4-exposures ]; then
+   get_compose_project_name
 
-      overwrite_shell_script_header ${WORKING_DIRECTORY}/.tcp4-exposures-reject
+   overwrite_shell_script_header ${WORKING_DIRECTORY}/.${PROJECT_NAME}-reject-script
 
-      echo "ipset create tcp4-exposures hash:ip,port" >> ${WORKING_DIRECTORY}/.tcp4-exposures-reject
+   if [ ${#EXPLICIT_PORT_MAPPINGS_IPV4[@]} -ne 0 ]; then
 
-      for i in $(sed 's#:#,tcp:#g' ${WORKING_DIRECTORY}/.tcp4-exposures); do
+      echo >> ${WORKING_DIRECTORY}/.${PROJECT_NAME}-reject-script
+      echo "iptables -t raw -C PREROUTING -p tcp -m set --match-set ${PROJECT_NAME}-exposed-tcp4 dst,dst -m comment --comment \"${IPTABLES_COMMENT}\" -j DROP || \\" >> ${WORKING_DIRECTORY}/.${PROJECT_NAME}-reject-script
+      echo "iptables -t raw -A PREROUTING -p tcp -m set --match-set ${PROJECT_NAME}-exposed-tcp4 dst,dst -m comment --comment \"${IPTABLES_COMMENT}\" -j DROP" >> ${WORKING_DIRECTORY}/.${PROJECT_NAME}-reject-script
 
-         echo "ipset add tcp4-exposures $i" >> ${WORKING_DIRECTORY}/.tcp4-exposures-reject
-      done
-
-      echo "iptables -t raw -C PREROUTING -p tcp -m set --match-set tcp4-exposures dst -m comment \"Unified Access Control\" -j DROP || \\" >> ${WORKING_DIRECTORY}/.tcp4-exposures-reject
-
-      echo "iptables -t raw -I PREROUTING -p tcp -m set --match-set tcp4-exposures dst -m comment \"Unified Access Control\" -j DROP" >> ${WORKING_DIRECTORY}/.tcp4-exposures-reject
-
-      echo "[Info] The TCP4 reject rules have been saved in ${WORKING_DIRECTORY}/.tcp4-exposures-reject"
+      echo >> ${WORKING_DIRECTORY}/.${PROJECT_NAME}-reject-script
+      echo "iptables -t raw -C PREROUTING -p udp -m set --match-set ${PROJECT_NAME}-exposed-udp4 dst,dst -m comment --comment \"${IPTABLES_COMMENT}\" -j DROP || \\" >> ${WORKING_DIRECTORY}/.${PROJECT_NAME}-reject-script
+      echo "iptables -t raw -A PREROUTING -p udp -m set --match-set ${PROJECT_NAME}-exposed-udp4 dst,dst -m comment --comment \"${IPTABLES_COMMENT}\" -j DROP" >> ${WORKING_DIRECTORY}/.${PROJECT_NAME}-reject-script
    fi
 
-   if [ -f ${WORKING_DIRECTORY}/.udp4-exposures ]; then
+   if [ ${#EXPLICIT_PORT_MAPPINGS_IPV6[@]} -ne 0 ]; then
 
-      overwrite_shell_script_header ${WORKING_DIRECTORY}/.udp4-exposures-reject
+      echo >> ${WORKING_DIRECTORY}/.${PROJECT_NAME}-reject-script
+      echo "ip6tables -t raw -C PREROUTING -p tcp -m set --match-set ${PROJECT_NAME}-exposed-tcp6 dst,dst -m comment --comment \"${IPTABLES_COMMENT}\" -j DROP || \\" >> ${WORKING_DIRECTORY}/.${PROJECT_NAME}-reject-script
+      echo "ip6tables -t raw -A PREROUTING -p tcp -m set --match-set ${PROJECT_NAME}-exposed-tcp6 dst,dst -m comment --comment \"${IPTABLES_COMMENT}\" -j DROP" >> ${WORKING_DIRECTORY}/.${PROJECT_NAME}-reject-script
 
-      echo "ipset create udp4-exposures hash:ip,port" >> ${WORKING_DIRECTORY}/.udp4-exposures-reject
-
-      for i in $(sed 's#:#,udp:#g' ${WORKING_DIRECTORY}/.udp4-exposures); do
-
-         echo "ipset add udp4-exposures $i" >> ${WORKING_DIRECTORY}/.udp4-exposures-reject
-      done
-
-      echo "iptables -t raw -C PREROUTING -p udp -m set --match-set udp4-exposures dst -m comment \"Unified Access Control\" -j DROP || \\" >> ${WORKING_DIRECTORY}/.udp4-exposures-reject
-
-      echo "iptables -t raw -I PREROUTING -p udp -m set --match-set udp4-exposures dst -m comment \"Unified Access Control\" -j DROP" >> ${WORKING_DIRECTORY}/.udp4-exposures-reject
-
-      echo "[Info] The UDP4 reject rules have been saved in ${WORKING_DIRECTORY}/.udp4-exposures-reject"
+      echo >> ${WORKING_DIRECTORY}/.${PROJECT_NAME}-reject-script
+      echo "ip6tables -t raw -C PREROUTING -p udp -m set --match-set ${PROJECT_NAME}-exposed-udp6 dst,dst -m comment --comment \"${IPTABLES_COMMENT}\" -j DROP || \\" >> ${WORKING_DIRECTORY}/.${PROJECT_NAME}-reject-script
+      echo "ip6tables -t raw -A PREROUTING -p udp -m set --match-set ${PROJECT_NAME}-exposed-udp6 dst,dst -m comment --comment \"${IPTABLES_COMMENT}\" -j DROP" >> ${WORKING_DIRECTORY}/.${PROJECT_NAME}-reject-script
    fi
 
-   if [ -f ${WORKING_DIRECTORY}/.tcp6-exposures ]; then
+   # The query script
+   echo >> ${WORKING_DIRECTORY}/.${PROJECT_NAME}-reject-script
+   echo "iptables -t raw -L PREROUTING -n --line-number | grep \"${PROJECT_NAME} Access Control\"" >> ${WORKING_DIRECTORY}/.${PROJECT_NAME}-reject-script
+   echo "ip6tables -t raw -L PREROUTING -n --line-number | grep \"${PROJECT_NAME} Access Control\"" >> ${WORKING_DIRECTORY}/.${PROJECT_NAME}-reject-script
 
-      overwrite_shell_script_header ${WORKING_DIRECTORY}/.tcp6-exposures-reject
+   # Convert multiple consecutive blank lines into one blank line
+   sed -i '/^$/N;/^\n$/D' ${WORKING_DIRECTORY}/.${PROJECT_NAME}-reject-script
 
-      echo "ipset create tcp6-exposures hash:ip,port family inet6" >> ${WORKING_DIRECTORY}/.tcp6-exposures-reject
-
-      for i in $(sed 's#^\(.*\):\([0-9]*\)$#\1,tcp:\2#g' ${WORKING_DIRECTORY}/.tcp6-exposures); do
-
-         echo "ipset add tcp6-exposures $i" >> ${WORKING_DIRECTORY}/.tcp6-exposures-reject
-      done
-
-      echo "ip6tables -t raw -C PREROUTING -p tcp -m set --match-set tcp6-exposures dst -m comment \"Unified Access Control\" -j DROP || \\" >> ${WORKING_DIRECTORY}/.tcp6-exposures-reject
-
-      echo "ip6tables -t raw -I PREROUTING -p tcp -m set --match-set tcp6-exposures dst -m comment \"Unified Access Control\" -j DROP" >> ${WORKING_DIRECTORY}/.tcp6-exposures-reject
-
-      echo "[Info] The TCP6 reject rules have been saved in ${WORKING_DIRECTORY}/.tcp6-exposures-reject"
-   fi
-
-   if [ -f ${WORKING_DIRECTORY}/.udp6-exposures ]; then
-
-      overwrite_shell_script_header ${WORKING_DIRECTORY}/.udp6-exposures-reject
-
-      echo "ipset create udp6-exposures hash:ip,port family inet6" >> ${WORKING_DIRECTORY}/.udp6-exposures-reject
-
-      for i in $(sed 's#^\(.*\):\([0-9]*\)$#\1,udp:\2#g' ${WORKING_DIRECTORY}/.udp6-exposures); do
-
-         echo "ipset add udp6-exposures $i" >> ${WORKING_DIRECTORY}/.udp6-exposures-reject
-      done
-
-      echo "ip6tables -t raw -C PREROUTING -p udp -m set --match-set udp6-exposures dst -m comment \"Unified Access Control\" -j DROP || \\" >> ${WORKING_DIRECTORY}/.udp6-exposures-reject
-
-      echo "ip6tables -t raw -I PREROUTING -p udp -m set --match-set udp6-exposures dst -m comment \"Unified Access Control\" -j DROP" >> ${WORKING_DIRECTORY}/.udp6-exposures-reject
-
-      echo "[Info] The UDP6 reject rules have been saved in ${WORKING_DIRECTORY}/.udp6-exposures-reject"
-   fi
+   echo "[Info] The iptables reject rules have been saved in ${WORKING_DIRECTORY}/.${PROJECT_NAME}-reject-script"
 }
+
+#
+# [Note] The script will erase all strategies of current docker-compose project
+#
+generate_iptables_reset_rules() {
+   :
+}
+
+#
+# [Note]
+#
+generate_update_scripts() {
+   :
+}
+
+
 
 enable_protections() {
    
@@ -685,7 +692,10 @@ disable_protections() {
 ####################################
 
 orderedPara=(
+   "--allow-access-between-compose-containers"
    "--generate-port-mapping-tables"
+   "--generate-iptables-allow-rules"
+   "--generate-iptables-reject-rules"
    "--enable-protections"
    "--query-protections"
    "--disable-protections"
@@ -693,7 +703,10 @@ orderedPara=(
 )
 
 declare -A mapParaFunc=(
+   ["--allow-access-between-compose-containers"]="allow_access_between_compose_containers"
    ["--generate-port-mapping-tables"]="generate_port_mapping_tables"
+   ["--generate-iptables-allow-rules"]="generate_iptables_allow_rules"
+   ["--generate-iptables-reject-rules"]="generate_iptables_reject_rules"
    ["--enable-protections"]="enable_protections"
    ["--query-protections"]="query_protections"
    ["--disable-protections"]="disable_protections"
@@ -701,7 +714,10 @@ declare -A mapParaFunc=(
 )
 
 declare -A mapParaSpec=(
-   ["--generate-port-mapping-tables"]="generate_port_mapping_tables"
+   ["--allow-access-between-compose-containers"]=""
+   ["--generate-port-mapping-tables"]="Retrieve port exposed surfaces from the static files of the Docker Compose project."
+   ["--generate-iptables-allow-rules"]="Generate iptables policy deployment script from Docker Compose project port exposure surface and authorized client IP."
+   ["--generate-iptables-reject-rules"]="Generate Iptables Policy Blocking Script from Docker Compose Project Port Exposure Surface."
    ["--enable-protections"]="Use this option to enable iptables policies."
    ["--query-protections"]="Use this option query iptables policies."
    ["--disable-protections"]="Use this option to disable iptables policies."
