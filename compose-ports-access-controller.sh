@@ -306,26 +306,44 @@ allow_access_between_compose_containers() {
 
    overwrite_shell_script_header ${WORKING_DIRECTORY}/.${PROJECT_NAME}-preventive-allow-script
 
+   # Add and remove existing iptables scripts, otherwise ipset will be locked and cannot be deleted or rebuilt
+   echo >> ${WORKING_DIRECTORY}/.${PROJECT_NAME}-preventive-allow-script
+   echo "for i in \$(iptables -t raw -L PREROUTING -n --line-number | grep \"$iptablesComment\" | awk '{print \$1}' | sort -nr); do" >> ${WORKING_DIRECTORY}/.${PROJECT_NAME}-preventive-allow-script
+   echo "   iptables -t raw -D PREROUTING \$i" >> ${WORKING_DIRECTORY}/.${PROJECT_NAME}-preventive-allow-script
+   echo "done" >> ${WORKING_DIRECTORY}/.${PROJECT_NAME}-preventive-allow-script
+
+   echo >> ${WORKING_DIRECTORY}/.${PROJECT_NAME}-preventive-allow-script
+   echo "for i in \$(ip6tables -t raw -L PREROUTING -n --line-number | grep \"$iptablesComment\" | awk '{print \$1}' | sort -nr); do" >> ${WORKING_DIRECTORY}/.${PROJECT_NAME}-preventive-allow-script
+   echo "   ip6tables -t raw -D PREROUTING \$i" >> ${WORKING_DIRECTORY}/.${PROJECT_NAME}-preventive-allow-script
+   echo "done" >> ${WORKING_DIRECTORY}/.${PROJECT_NAME}-preventive-allow-script
+
+   echo >> ${WORKING_DIRECTORY}/.${PROJECT_NAME}-preventive-allow-script
    echo "ipset destroy ${PROJECT_NAME}-trust-ipv4-subnets" >> ${WORKING_DIRECTORY}/.${PROJECT_NAME}-preventive-allow-script
    echo "ipset destroy ${PROJECT_NAME}-trust-ipv6-subnets" >> ${WORKING_DIRECTORY}/.${PROJECT_NAME}-preventive-allow-script
    echo "ipset create ${PROJECT_NAME}-trust-ipv4-subnets hash:net" >> ${WORKING_DIRECTORY}/.${PROJECT_NAME}-preventive-allow-script
    echo "ipset create ${PROJECT_NAME}-trust-ipv6-subnets hash:net family inet6" >> ${WORKING_DIRECTORY}/.${PROJECT_NAME}-preventive-allow-script
 
+   echo >> ${WORKING_DIRECTORY}/.${PROJECT_NAME}-preventive-allow-script
    for i in ${TRUST_IPV4_CIDRS[@]}; do
       echo "ipset add ${PROJECT_NAME}-trust-ipv4-subnets $i" >> ${WORKING_DIRECTORY}/.${PROJECT_NAME}-preventive-allow-script
    done
 
+   echo >> ${WORKING_DIRECTORY}/.${PROJECT_NAME}-preventive-allow-script
    for i in ${TRUST_IPV6_CIDRS[@]}; do
       echo "ipset add ${PROJECT_NAME}-trust-ipv6-subnets $i" >> ${WORKING_DIRECTORY}/.${PROJECT_NAME}-preventive-allow-script
    done
 
    # Communications in TCP4/UDP4
+   echo >> ${WORKING_DIRECTORY}/.${PROJECT_NAME}-preventive-allow-script
    echo "iptables -t raw -C PREROUTING -m set --match-set ${PROJECT_NAME}-trust-ipv4-subnets src -m set --match-set ${PROJECT_NAME}-trust-ipv4-subnets dst -m comment --comment \"$iptablesComment\" -j ACCEPT || \\" >> ${WORKING_DIRECTORY}/.${PROJECT_NAME}-preventive-allow-script
    echo "iptables -t raw -I PREROUTING -m set --match-set ${PROJECT_NAME}-trust-ipv4-subnets src -m set --match-set ${PROJECT_NAME}-trust-ipv4-subnets dst -m comment --comment \"$iptablesComment\" -j ACCEPT" >> ${WORKING_DIRECTORY}/.${PROJECT_NAME}-preventive-allow-script
 
    # Communications in TCP6/UDP6
+   echo >> ${WORKING_DIRECTORY}/.${PROJECT_NAME}-preventive-allow-script
    echo "ip6tables -t raw -C PREROUTING -m set --match-set ${PROJECT_NAME}-trust-ipv6-subnets src -m set --match-set ${PROJECT_NAME}-trust-ipv6-subnets dst -m comment --comment \"$iptablesComment\" -j ACCEPT || \\" >> ${WORKING_DIRECTORY}/.${PROJECT_NAME}-preventive-allow-script
    echo "ip6tables -t raw -I PREROUTING -m set --match-set ${PROJECT_NAME}-trust-ipv6-subnets src -m set --match-set ${PROJECT_NAME}-trust-ipv6-subnets dst -m comment --comment \"$iptablesComment\" -j ACCEPT" >> ${WORKING_DIRECTORY}/.${PROJECT_NAME}-preventive-allow-script
+
+   sed -i '/^$/N;/^\n$/D' ${WORKING_DIRECTORY}/.${PROJECT_NAME}-preventive-allow-script
 
    echo "[Info] The preventive iptables allow rules have been saved in ${WORKING_DIRECTORY}/.${PROJECT_NAME}-preventive-allow-script"
 }
@@ -615,76 +633,37 @@ generate_iptables_reject_rules() {
 }
 
 #
-# [Note] The script will erase all strategies of current docker-compose project
+# [Note] The script will erase all strategies of current docker-compose project immediately
 #
-generate_iptables_reset_rules() {
-   :
-}
+remove_iptables_protect_rules() {
 
-#
-# [Note]
-#
-generate_update_scripts() {
-   :
-}
-
-
-
-enable_protections() {
+   local i=
    
-   allow_access_between_compose_containers
+   get_compose_project_name
 
-   allow_host_containers_to_exposed_ports
-
-   allow_host_containers_to_compose_containers
-
-   allow_access_from_legacy_clients
-}
-
-query_protections() {
-
-   local NETWORK_NAME=$(yq r -p p docker-compose.yml networks[*] | sed 's#networks.##g' | head -1)
-   if [ -z "${NETWORK_NAME}" ]; then
-      echo '[Warn] You should provide a private network name for the containers.'
-      exit -1
-   fi
-
-   echo '[Info] iptables → raw → PREROUTING:'
-   iptables -t raw -L PREROUTING -n --line-number 2>/dev/null | grep "Access controls of ${NETWORK_NAME}" | sed 's#^#   #g'
-
-   echo '[Info] iptables → filter → DOCKER-USER:'
-   iptables -L DOCKER-USER -n --line-number 2>/dev/null | grep "Access controls of ${NETWORK_NAME}" | sed 's#^#   #g'
-
-   echo '[Info] ip6tables → raw → PREROUTING:'
-   ip6tables -t raw -L PREROUTING -n --line-number 2>/dev/null | grep "Access controls of ${NETWORK_NAME}" | sed 's#^#   #g'
-
-   echo '[Info] ip6tables → filter → DOCKER-USER:'
-   ip6tables -L DOCKER-USER -n --line-number 2>/dev/null | grep "Access controls of ${NETWORK_NAME}" | sed 's#^#   #g'
-}
-
-disable_protections() {
-
-   local NETWORK_NAME=$(yq r -p p docker-compose.yml networks[*] | sed 's#networks.##g' | head -1)
-   if [ -z "${NETWORK_NAME}" ]; then
-      echo '[Warn] You should provide a private network name for the containers.'
-      exit -1
-   fi
-
-   for i in $(iptables -t raw -L PREROUTING -n --line-number | grep "Access controls of ${NETWORK_NAME}" | awk '{print $1}' | sort -nr); do
+   for i in $(iptables -t raw -L PREROUTING -n --line-number | grep "${IPTABLES_COMMENT}" | awk '{print $1}' | sort -nr); do
       iptables -t raw -D PREROUTING $i
    done
 
-   for i in $(iptables -L DOCKER-USER -n --line-number | grep "Access controls of ${NETWORK_NAME}" | awk '{print $1}' | sort -nr); do
-      iptables -D DOCKER-USER $i
-   done
-
-   for i in $(ip6tables -t raw -L PREROUTING -n --line-number | grep "Access controls of ${NETWORK_NAME}" | awk '{print $1}' | sort -nr); do
+   for i in $(ip6tables -t raw -L PREROUTING -n --line-number | grep "${IPTABLES_COMMENT}" | awk '{print $1}' | sort -nr); do
       ip6tables -t raw -D PREROUTING $i
    done
+}
 
-   for i in $(ip6tables -L DOCKER-USER -n --line-number | grep "Access controls of ${NETWORK_NAME}" | awk '{print $1}' | sort -nr); do
-      ip6tables -D DOCKER-USER $i
-   done
+#
+# [Note] Generate ipset records update script. Avoid rebuilding the entire iptables and support adding protection policies directly in the production environment.
+#
+generate_ipset_update_script() {
+
+   get_compose_project_name
+   allow_access_between_compose_containers
+   generate_iptables_allow_rules
+
+   sed -e 's#^ipset destroy#ipset flush#g' -e '/^ipset create /d' -e '/iptables -t /d' -e '/ip6tables -t /d' -e '/done/d' ${WORKING_DIRECTORY}/.${PROJECT_NAME}-preventive-allow-script | sed '/^$/N;/^\n$/D' > ${WORKING_DIRECTORY}/.${PROJECT_NAME}-preventive-update-script
+
+   sed -e 's#^ipset destroy#ipset flush#g' -e '/^ipset create /d' -e '/iptables -t /d' -e '/ip6tables -t /d' -e '/done/d' ${WORKING_DIRECTORY}/.${PROJECT_NAME}-allow-script | sed '/^$/N;/^\n$/D' > ${WORKING_DIRECTORY}/.${PROJECT_NAME}-update-script
+
+   echo "[Info] The ipset update rules have been saved in ${WORKING_DIRECTORY}/.${PROJECT_NAME}-preventive-update-script and ${WORKING_DIRECTORY}/.${PROJECT_NAME}-update-script."
 }
 
 ####################################
@@ -696,9 +675,7 @@ orderedPara=(
    "--generate-port-mapping-tables"
    "--generate-iptables-allow-rules"
    "--generate-iptables-reject-rules"
-   "--enable-protections"
-   "--query-protections"
-   "--disable-protections"
+   "--generate-ipset-update-script"
    "--usage"
 )
 
@@ -707,20 +684,16 @@ declare -A mapParaFunc=(
    ["--generate-port-mapping-tables"]="generate_port_mapping_tables"
    ["--generate-iptables-allow-rules"]="generate_iptables_allow_rules"
    ["--generate-iptables-reject-rules"]="generate_iptables_reject_rules"
-   ["--enable-protections"]="enable_protections"
-   ["--query-protections"]="query_protections"
-   ["--disable-protections"]="disable_protections"
+   ["--generate-ipset-update-script"]="generate_ipset_update_script"
    ["--usage"]="usage"
 )
 
 declare -A mapParaSpec=(
-   ["--allow-access-between-compose-containers"]=""
+   ["--allow-access-between-compose-containers"]="Generate preventive iptables strategies scripts."
    ["--generate-port-mapping-tables"]="Retrieve port exposed surfaces from the static files of the Docker Compose project."
    ["--generate-iptables-allow-rules"]="Generate iptables policy deployment script from Docker Compose project port exposure surface and authorized client IP."
    ["--generate-iptables-reject-rules"]="Generate Iptables Policy Blocking Script from Docker Compose Project Port Exposure Surface."
-   ["--enable-protections"]="Use this option to enable iptables policies."
-   ["--query-protections"]="Use this option query iptables policies."
-   ["--disable-protections"]="Use this option to disable iptables policies."
+   ["--generate-ipset-update-script"]="Generate ipset records update script. Avoid rebuilding the entire iptables and support adding protection policies directly in the production environment."
    ["--usage"]="Operation Manual"
 )
 
