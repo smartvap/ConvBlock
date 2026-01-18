@@ -666,6 +666,77 @@ generate_ipset_update_script() {
    echo "[Info] The ipset update rules have been saved in ${WORKING_DIRECTORY}/.${PROJECT_NAME}-preventive-update-script and ${WORKING_DIRECTORY}/.${PROJECT_NAME}-update-script."
 }
 
+auto_configure_compose_iptables() {
+   :
+}
+
+enable_auto_configure_compose_iptables_timer() {
+
+   local currentRealPath=$(realpath $0)
+   local templateServicePath=${WORKING_DIRECTORY}/auto-configure-template.service
+   local templateTimerPath=${WORKING_DIRECTORY}/auto-configure-template.timer
+
+   if [ ! -f "$templateServicePath" ] || [ ! -f "$templateTimerPath" ]; then
+      echo "[Warn] The corresponding template file is missing: $templateServicePath or $templateTimerPath"
+      exit -1
+   fi
+
+   load_system_service_unit_file_path
+
+   if [ -z "${SYSTEM_SERVICE_UNIT_FILE_PATH}" ]; then
+      echo '[Warn] Failed to obtain system service unit file path.'
+      exit -1
+   fi
+
+   local targetServicePath=${SYSTEM_SERVICE_UNIT_FILE_PATH}/auto-configure-compose-iptables.service
+   local targetTimerPath=${SYSTEM_SERVICE_UNIT_FILE_PATH}/auto-configure-compose-iptables.timer
+
+   /usr/bin/cp -f $templateServicePath $targetServicePath
+   /usr/bin/cp -f $templateTimerPath $targetTimerPath
+
+   python3 ${WORKING_DIRECTORY}/ini-util.py --write $targetServicePath Unit Description "Auto configure compose iptables"
+   python3 ${WORKING_DIRECTORY}/ini-util.py --write $targetServicePath Service ExecStart "/bin/bash $currentRealPath --auto-configure-compose-iptables"
+   python3 ${WORKING_DIRECTORY}/ini-util.py --write $targetTimerPath Unit Description "Auto configure secondary IP addresses"
+   python3 ${WORKING_DIRECTORY}/ini-util.py --write $targetTimerPath Unit Requires "$(basename $targetServicePath)"
+
+   systemctl daemon-reload
+   systemctl enable $(basename $targetServicePath) --now
+   systemctl enable $(basename $targetTimerPath) --now
+
+   echo
+   systemctl status $(basename $targetServicePath)
+
+   echo
+   systemctl status $(basename $targetTimerPath)
+
+   echo
+   systemctl list-timers --all --no-page
+}
+
+disable_secondary_ip_addresses_timer() {
+
+   load_system_service_unit_file_path
+
+   if [ -z "${SYSTEM_SERVICE_UNIT_FILE_PATH}" ]; then
+      echo '[Warn] Failed to obtain system service unit file path.'
+      exit -1
+   fi
+
+   local targetServicePath=${SYSTEM_SERVICE_UNIT_FILE_PATH}/auto-configure-secondary-ip-addresses.service
+   local targetTimerPath=${SYSTEM_SERVICE_UNIT_FILE_PATH}/auto-configure-secondary-ip-addresses.timer
+
+   systemctl disable $(basename $targetServicePath) --now
+   systemctl disable $(basename $targetTimerPath) --now
+
+   /usr/bin/rm -f $targetServicePath
+   /usr/bin/rm -f $targetTimerPath
+
+   echo "[Info] Both $targetServicePath and $targetTimerPath are disabled and removed."
+
+   echo
+   systemctl list-timers --all --no-page
+}
+
 ####################################
 # Function Mappings Area           #
 ####################################
