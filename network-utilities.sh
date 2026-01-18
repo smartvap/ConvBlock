@@ -36,20 +36,6 @@ if [ -f ~/.profile ]; then
    source ~/.profile
 fi
 
-#########################################
-# Prerequisites of pip3                 #
-#########################################
-
-pip3 show ipaddress 1>/dev/null 2>/dev/null
-if [ $? -ne 0 ]; then
-   pip3 install ipaddress-1.0.23-py2.py3-none-any.whl
-fi
-
-pip3 show netaddr 1>/dev/null 2>/dev/null
-if [ $? -ne 0 ]; then
-   pip3 install netaddr-1.3.0-py3-none-any.whl
-fi
-
 #
 # [Note] The common storage and management networks in IaaS are usually isolated from the business data network. The following is sample data, please modify it according to the actual situation.
 #
@@ -71,6 +57,29 @@ LOOPBACK_SUBNETS_IPV6=::1/128
 # [Note] Is IPv6 prioritized
 #
 PREFER_IPV6=false
+
+#########################################
+# Prerequisites                         #
+#########################################
+
+pip3 show ipaddress 1>/dev/null 2>/dev/null
+if [ $? -ne 0 ]; then
+   pip3 install ipaddress-1.0.23-py2.py3-none-any.whl
+fi
+
+pip3 show netaddr 1>/dev/null 2>/dev/null
+if [ $? -ne 0 ]; then
+   pip3 install netaddr-1.3.0-py3-none-any.whl
+fi
+
+if [ -z "$(which yq 2>/dev/null)" ] && [ -z "$(alias yq 2>/dev/null)" ]; then
+   [ "$(arch)" == "x86_64" ] && /usr/bin/cp -rp ${WORKING_DIRECTORY}/yq_linux_amd64 /usr/bin/yq && chmod +x /usr/bin/yq
+   [ "$(arch)" == "aarch64" ] && /usr/bin/cp -rp ${WORKING_DIRECTORY}/yq_linux_arm64 /usr/bin/yq && chmod +x /usr/bin/yq
+fi
+
+if [ -z "$(which jq 2>/dev/null)" ] && [ -z "$(alias jq 2>/dev/null)" ]; then
+   yum -y install jq
+fi
 
 #
 # [Note] Convert subnet address to standard subnet address format.

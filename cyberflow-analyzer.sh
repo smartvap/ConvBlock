@@ -104,16 +104,6 @@ if [ -z "$(which lsof 2>/dev/null)" ] && [ -z "$(alias lsof 2>/dev/null)" ]; the
    exit -1
 fi
 
-if [ -z "$(which jq 2>/dev/null)" ] && [ -z "$(alias jq 2>/dev/null)" ]; then
-   echo '[Warn] jq is not installed yet.'
-   exit -1
-fi
-
-if [ -z "$(which yq 2>/dev/null)" ] && [ -z "$(alias yq 2>/dev/null)" ]; then
-   echo '[Warn] yq is not installed yet.'
-   exit -1
-fi
-
 if [ -z "$(which python2 2>/dev/null)" ] && [ -z "$(alias python2 2>/dev/null)" ]; then
    echo '[Warn] python2 is not installed yet.'
    exit -1
