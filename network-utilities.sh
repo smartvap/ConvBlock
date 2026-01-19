@@ -64,12 +64,12 @@ PREFER_IPV6=false
 
 pip3 show ipaddress 1>/dev/null 2>/dev/null
 if [ $? -ne 0 ]; then
-   pip3 install ipaddress-1.0.23-py2.py3-none-any.whl
+   pip3 install ${WORKING_DIRECTORY}/vendor/python3/ipaddress-1.0.23-py2.py3-none-any.whl
 fi
 
 pip3 show netaddr 1>/dev/null 2>/dev/null
 if [ $? -ne 0 ]; then
-   pip3 install netaddr-1.3.0-py3-none-any.whl
+   pip3 install ${WORKING_DIRECTORY}/vendor/python3/netaddr-1.3.0-py3-none-any.whl
 fi
 
 if [ -z "$(which yq 2>/dev/null)" ] && [ -z "$(alias yq 2>/dev/null)" ]; then
