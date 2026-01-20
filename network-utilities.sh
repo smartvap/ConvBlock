@@ -82,6 +82,81 @@ if [ -z "$(which jq 2>/dev/null)" ] && [ -z "$(alias jq 2>/dev/null)" ]; then
 fi
 
 #
+# [Note] Push file to node
+#
+deliver() {
+
+   local localFile=$1
+   local sshServer=$2
+   local sshPort=$3
+   local remoteFolder=$(dirname $(realpath $localFile))
+
+   ssh -p $sshPort $sshServer "mkdir -p $remoteFolder"
+
+   scp -o ConnectTimeout=5 -P $sshPort -rp $localFile $sshServer:$remoteFolder 2>/dev/null
+}
+
+#
+# [Note] Push specified file to all K8s nodes
+#
+batch_remote_deliver() {
+
+   local filePath=$1
+   local jobCount=0
+
+   if [ -z "$filePath" ] || [ ! -f "$filePath" ]; then
+      echo '[Warn] Please provide a valid path of the file to be delivered.'
+      exit -1
+   fi
+
+   load_k8s_nodes_ip_addresses_from_file
+
+   for i in ${K8S_NODES_IP_ADDRESSES[@]}; do
+      (deliver $filePath $i ${LEGACY_SSHD_ORIGINAL_PORT}) &
+      ((jobCount++))
+
+      if [[ $jobCount -ge ${MAX_JOBS} ]]; then
+         wait          # Waiting for all current background tasks to end
+         jobCount=0    # Reset counter
+      fi
+   done
+
+   wait
+
+   echo "[Complete]"
+}
+
+#
+# [Note] Execute programs on all K8s nodes
+#
+batch_remote_execute() {
+
+   local commands="${*}"
+   local jobCount=0
+
+   if [ -z "$filePath" ] || [ ! -f "$filePath" ]; then
+      echo '[Warn] Please provide a valid path of the file to be delivered.'
+      exit -1
+   fi
+
+   load_k8s_nodes_ip_addresses_from_file
+
+   for i in ${K8S_NODES_IP_ADDRESSES[@]}; do
+      ("$commands") &
+      ((jobCount++))
+
+      if [[ $jobCount -ge ${MAX_JOBS} ]]; then
+         wait          # Waiting for all current background tasks to end
+         jobCount=0    # Reset counter
+      fi
+   done
+
+   wait
+
+   echo "[Complete]"
+}
+
+#
 # [Note] Convert subnet address to standard subnet address format.
 # [Example] 192.168.0.2/24 → 192.168.0.0/24, 192.168.0.2/255.255.255.0 → 192.168.0.0/24
 #
@@ -784,6 +859,14 @@ get_k8s_nodes_ip_addresses() {
 }
 
 #
+# [Note] Obtain the cluster pods inventory view, also named [pods topology overview], as well as [all namespaces pods audit view], [k8s pods resources snapshot] and [pods infrastructure matrix]. The current feature depends on the kubectl permissions.
+#
+get_k8s_pods_inventory_view() {
+
+   kubectl get pod --all-namespaces --request-timeout=8s --no-headers -o custom-columns=NAMESPACE:metadata.namespace,NAME:metadata.name,HOSTIP:status.hostIP,POD_IP:status.podIP,IMAGE:spec.containers[*].image 2>/dev/null | awk '{print $1","$2","$3","$4","$5}' > .k8s-pods-inventory-view
+}
+
+#
 # [Note] KVM Virtual Network IP addresses. The name of the KVM virtual network card can be specified arbitrarily, not limited to virbr_, so it should be obtained using professional management tools.
 #
 get_kvm_subnet_addresses() {
@@ -1331,6 +1414,8 @@ disable_secondary_ip_addresses_timer() {
 }
 
 orderedPara=(
+   "--batch-remote-deliver"
+   "--batch-remote-execute"
    "--standardize-ip-address"
    "--standardize-ip-addresses"
    "--ip-to-int"
@@ -1346,6 +1431,7 @@ orderedPara=(
    "--dump-service-cidr-from-service-list"
    "--get-service-cidr"
    "--get-k8s-nodes-ip-addresses"
+   "--get-k8s-pods-inventory-view"
    "--get-kvm-subnet-addresses"
    "--get-vmware-subnet-addresses"
    "--get-external-ip-addresses"
@@ -1361,6 +1447,8 @@ orderedPara=(
 )
 
 declare -A mapParaFunc=(
+   ["--batch-remote-deliver"]="batch_remote_deliver"
+   ["--batch-remote-execute"]="batch_remote_execute"
    ["--standardize-ip-address"]="standardize_ip_address"
    ["--standardize-ip-addresses"]="standardize_ip_addresses"
    ["--ip-to-int"]="ip_to_int"
@@ -1376,6 +1464,7 @@ declare -A mapParaFunc=(
    ["--dump-service-cidr-from-service-list"]="dump_service_cidr_from_service_list"
    ["--get-service-cidr"]="get_service_cidr"
    ["--get-k8s-nodes-ip-addresses"]="get_k8s_nodes_ip_addresses"
+   ["--get-k8s-pods-inventory-view"]="get_k8s_pods_inventory_view"
    ["--get-kvm-subnet-addresses"]="get_kvm_subnet_addresses"
    ["--get-vmware-subnet-addresses"]="get_vmware_subnet_addresses"
    ["--get-external-ip-addresses"]="get_external_ip_addresses"
@@ -1391,6 +1480,8 @@ declare -A mapParaFunc=(
 )
 
 declare -A mapParaSpec=(
+   ["--batch-remote-deliver"]="Batchly push specified files to remote nodes."
+   ["--batch-remote-execute"]="Batchly execute some commands on remote nodes."
    ["--standardize-ip-address"]="Convert one single IPv4/6 address to strict subnet mode, for instance: 192.168.0.10/24 → 192.168.0.0/24."
    ["--standardize-ip-addresses"]="Convert multiple IPv4/6 addresses to strict subnet mode"
    ["--ip-to-int"]="Convert IPv4 to integer type. Usage: $0 --ip-to-int a.b.c.d"
@@ -1406,6 +1497,7 @@ declare -A mapParaSpec=(
    ["--dump-service-cidr-from-service-list"]="Retrieve K8s service CIDR from any node, independent of the functionality of the master node."
    ["--get-service-cidr"]="Save K8s service CIDRs into hidden files, we will try the 2 methods mentioned above one by one and guide you to find the effective one."
    ["--get-k8s-nodes-ip-addresses"]="Load real IP of K8s nodes, and save in a hidden file."
+   ["--get-k8s-pods-inventory-view"]="Load K8s pods infrastructure matrix."
    ["--get-kvm-subnet-addresses"]="Save subnets of KVM virtual network interfaces into a hidden file."
    ["--get-vmware-subnet-addresses"]="Save subnets of VMware Workstation virtual network interfaces into a hidden file."
    ["--get-external-ip-addresses"]="Save all external IP addresses to a specified hidden file: .external-ip."
