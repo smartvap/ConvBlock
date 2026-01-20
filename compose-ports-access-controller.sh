@@ -307,21 +307,22 @@ allow_access_between_compose_containers() {
    overwrite_shell_script_header ${WORKING_DIRECTORY}/.${PROJECT_NAME}-preventive-allow-script
 
    # Add and remove existing iptables scripts, otherwise ipset will be locked and cannot be deleted or rebuilt
-   echo >> ${WORKING_DIRECTORY}/.${PROJECT_NAME}-preventive-allow-script
-   echo "for i in \$(iptables -t raw -L PREROUTING -n --line-number | grep \"$iptablesComment\" | awk '{print \$1}' | sort -nr); do" >> ${WORKING_DIRECTORY}/.${PROJECT_NAME}-preventive-allow-script
-   echo "   iptables -t raw -D PREROUTING \$i" >> ${WORKING_DIRECTORY}/.${PROJECT_NAME}-preventive-allow-script
-   echo "done" >> ${WORKING_DIRECTORY}/.${PROJECT_NAME}-preventive-allow-script
+   # echo >> ${WORKING_DIRECTORY}/.${PROJECT_NAME}-preventive-allow-script
+   # echo "for i in \$(iptables -t raw -L PREROUTING -n --line-number | grep \"$iptablesComment\" | awk '{print \$1}' | sort -nr); do" >> ${WORKING_DIRECTORY}/.${PROJECT_NAME}-preventive-allow-script
+   # echo "   iptables -t raw -D PREROUTING \$i" >> ${WORKING_DIRECTORY}/.${PROJECT_NAME}-preventive-allow-script
+   # echo "done" >> ${WORKING_DIRECTORY}/.${PROJECT_NAME}-preventive-allow-script
+
+   # echo >> ${WORKING_DIRECTORY}/.${PROJECT_NAME}-preventive-allow-script
+   # echo "for i in \$(ip6tables -t raw -L PREROUTING -n --line-number | grep \"$iptablesComment\" | awk '{print \$1}' | sort -nr); do" >> ${WORKING_DIRECTORY}/.${PROJECT_NAME}-preventive-allow-script
+   # echo "   ip6tables -t raw -D PREROUTING \$i" >> ${WORKING_DIRECTORY}/.${PROJECT_NAME}-preventive-allow-script
+   # echo "done" >> ${WORKING_DIRECTORY}/.${PROJECT_NAME}-preventive-allow-script
 
    echo >> ${WORKING_DIRECTORY}/.${PROJECT_NAME}-preventive-allow-script
-   echo "for i in \$(ip6tables -t raw -L PREROUTING -n --line-number | grep \"$iptablesComment\" | awk '{print \$1}' | sort -nr); do" >> ${WORKING_DIRECTORY}/.${PROJECT_NAME}-preventive-allow-script
-   echo "   ip6tables -t raw -D PREROUTING \$i" >> ${WORKING_DIRECTORY}/.${PROJECT_NAME}-preventive-allow-script
-   echo "done" >> ${WORKING_DIRECTORY}/.${PROJECT_NAME}-preventive-allow-script
-
-   echo >> ${WORKING_DIRECTORY}/.${PROJECT_NAME}-preventive-allow-script
-   echo "ipset destroy ${PROJECT_NAME}-trust-ipv4-subnets" >> ${WORKING_DIRECTORY}/.${PROJECT_NAME}-preventive-allow-script
-   echo "ipset destroy ${PROJECT_NAME}-trust-ipv6-subnets" >> ${WORKING_DIRECTORY}/.${PROJECT_NAME}-preventive-allow-script
-   echo "ipset create ${PROJECT_NAME}-trust-ipv4-subnets hash:net" >> ${WORKING_DIRECTORY}/.${PROJECT_NAME}-preventive-allow-script
-   echo "ipset create ${PROJECT_NAME}-trust-ipv6-subnets hash:net family inet6" >> ${WORKING_DIRECTORY}/.${PROJECT_NAME}-preventive-allow-script
+   # echo "ipset destroy ${PROJECT_NAME}-trust-ipv4-subnets" >> ${WORKING_DIRECTORY}/.${PROJECT_NAME}-preventive-allow-script
+   # echo "ipset destroy ${PROJECT_NAME}-trust-ipv6-subnets" >> ${WORKING_DIRECTORY}/.${PROJECT_NAME}-preventive-allow-script
+   echo "ipset create ${PROJECT_NAME}-trust-ipv4-subnets hash:net 2>/dev/null" >> ${WORKING_DIRECTORY}/.${PROJECT_NAME}-preventive-allow-script
+   echo "ipset create ${PROJECT_NAME}-trust-ipv6-subnets hash:net family inet6 2>/dev/null" >> ${WORKING_DIRECTORY}/.${PROJECT_NAME}-preventive-allow-script
+   
 
    echo >> ${WORKING_DIRECTORY}/.${PROJECT_NAME}-preventive-allow-script
    for i in ${TRUST_IPV4_CIDRS[@]}; do

@@ -822,9 +822,9 @@ get_kvm_subnet_addresses() {
    for i in ${KVM_SUBNET_ADDRESSES[@]}; do
       local ipFamily=$(python3 ${WORKING_DIRECTORY}/network-utilities.py --get-ip-family "$i")
       if [ "$ipFamily" == "IPv4" ]; then
-         KVM_SUBNET_ADDRESSES_IPV4=(${KVM_SUBNET_ADDRESSES[@]} "$i")
+         KVM_SUBNET_ADDRESSES_IPV4=(${KVM_SUBNET_ADDRESSES_IPV4[@]} "$i")
       elif [ "$ipFamily" == "IPv6" ]; then
-         KVM_SUBNET_ADDRESSES_IPV6=(${KVM_SUBNET_ADDRESSES[@]} "$i")
+         KVM_SUBNET_ADDRESSES_IPV6=(${KVM_SUBNET_ADDRESSES_IPV6[@]} "$i")
       fi
    done
 

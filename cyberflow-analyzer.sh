@@ -254,6 +254,8 @@ LOOPBACK_SUBNETS_IPV6=::1/128
 
 PREFER_IPV6=false
 
+IPTABLES_COMMENT='Unified Access Control'
+
 #########################################
 # Load Configuration Data               #
 #########################################
@@ -280,6 +282,17 @@ load_external_ip_addresses_from_file() {
    EXTERNAL_IP_ADDRESSES=($(cat ${WORKING_DIRECTORY}/.external-ip 2>/dev/null))
    EXTERNAL_IPV4_ADDRESSES=($(cat ${WORKING_DIRECTORY}/.external-ipv4 2>/dev/null))
    EXTERNAL_IPV6_ADDRESSES=($(cat ${WORKING_DIRECTORY}/.external-ipv6 2>/dev/null))
+}
+
+load_default_route_ip_addresses_from_file() {
+
+   if [ ! -f ${WORKING_DIRECTORY}/.default-route-addresses ] || [[ "${*}" =~ "--no-cache" ]]; then
+      ${WORKING_DIRECTORY}/network-utilities.sh --get-default-route-ip-addresses
+   fi
+
+   DEFAULT_ROUTE_ADDRESSES=($(cat ${WORKING_DIRECTORY}/.default-route-addresses 2>/dev/null))
+   DEFAULT_IPV4_ROUTE_ADDRESSES=($(cat ${WORKING_DIRECTORY}/.default-ipv4-route-addresses 2>/dev/null))
+   DEFAULT_IPV6_ROUTE_ADDRESSES=($(cat ${WORKING_DIRECTORY}/.default-ipv6-route-addresses 2>/dev/null))
 }
 
 load_docker_subnet_addresses_from_file() {
@@ -576,6 +589,9 @@ writeback_temporary_file() {
    echo "[Info] Writeback $temporaryFilePath → $originalFilePath"
 }
 
+#
+# [Note] Push file to node
+#
 deliver() {
 
    local localFile=$1
@@ -618,6 +634,9 @@ batch_remote_deliver() {
    echo "[Complete]"
 }
 
+#
+# [Note] Execute programs on all K8s nodes
+#
 batch_remote_execute() {
 
    local commands="${*}"
@@ -1206,8 +1225,8 @@ dump_listening_tables() {
    >${WORKING_DIRECTORY}/.udp6-listening-exposures
 
    if [ ${#EXTERNAL_IPV4_ADDRESSES[@]} -ne 0 ]; then
-      ss -4nltp | awk '{print $4,$5,$6}' | tail -n +2 >> ${WORKING_DIRECTORY}/.tcp4-listening-exposures
-      ss -4nlup | awk '{print $4,$5,$6}' | tail -n +2 >> ${WORKING_DIRECTORY}/.udp4-listening-exposures
+      ss -4nltp -e | sed 's/%[^:]*:/:/g' | awk '{print $4,$5,$6}' | tail -n +2 >> ${WORKING_DIRECTORY}/.tcp4-listening-exposures
+      ss -4nlup -e | sed 's/%[^:]*:/:/g' | awk '{print $4,$5,$6}' | tail -n +2 >> ${WORKING_DIRECTORY}/.udp4-listening-exposures
 
       local n_tcp4=$(wc -l ${WORKING_DIRECTORY}/.tcp4-listening-exposures | awk '{print $1}')
       local n_udp4=$(wc -l ${WORKING_DIRECTORY}/.udp4-listening-exposures | awk '{print $1}')
@@ -1217,8 +1236,8 @@ dump_listening_tables() {
    fi
 
    if [ ${#EXTERNAL_IPV6_ADDRESSES[@]} -ne 0 ]; then
-      ss -6nltp | awk '{print $4,$5,$6}' | tail -n +2 >> ${WORKING_DIRECTORY}/.tcp6-listening-exposures
-      ss -6nlup | awk '{print $4,$5,$6}' | tail -n +2 >> ${WORKING_DIRECTORY}/.udp6-listening-exposures
+      ss -6nltp -e | sed 's/%[^:]*:/:/g' | awk '{print $4,$5,$6}' | tail -n +2 >> ${WORKING_DIRECTORY}/.tcp6-listening-exposures
+      ss -6nlup -e | sed 's/%[^:]*:/:/g' | awk '{print $4,$5,$6}' | tail -n +2 >> ${WORKING_DIRECTORY}/.udp6-listening-exposures
 
       local n_tcp6=$(wc -l ${WORKING_DIRECTORY}/.tcp6-listening-exposures | awk '{print $1}')
       local n_udp6=$(wc -l ${WORKING_DIRECTORY}/.udp6-listening-exposures | awk '{print $1}')
@@ -1454,7 +1473,9 @@ merge_exposures() {
 preventive_iptables_allow_rules() {
 
    local i=
+   local params="${*}"
    
+   load_default_route_ip_addresses_from_file --no-cache
    load_docker_subnet_addresses_from_file
    load_cluster_cidr_from_file
    load_service_cidr_from_file
@@ -1464,34 +1485,37 @@ preventive_iptables_allow_rules() {
 
    overwrite_shell_script_header ${WORKING_DIRECTORY}/.preventive-allow-script
 
-   echo "ipset destroy permit-subnets-ipv4" >> ${WORKING_DIRECTORY}/.preventive-allow-script
-   echo "ipset destroy permit-subnets-ipv6" >> ${WORKING_DIRECTORY}/.preventive-allow-script
-   echo "ipset create permit-subnets-ipv4 hash:net" >> ${WORKING_DIRECTORY}/.preventive-allow-script
-   echo "ipset create permit-subnets-ipv6 hash:net" >> ${WORKING_DIRECTORY}/.preventive-allow-script
+   echo >> ${WORKING_DIRECTORY}/.preventive-allow-script
+   # Ignore the error message that IPsec already exists, support automatic loading after host restart and regularly execute strategy repairs
+   echo "ipset create permit-subnets-ipv4 hash:net 2>/dev/null" >> ${WORKING_DIRECTORY}/.preventive-allow-script
+   echo "ipset create permit-subnets-ipv6 hash:net family inet6 2>/dev/null" >> ${WORKING_DIRECTORY}/.preventive-allow-script
+   # During the period of open business production, regular strategy repairs should be carried out, and it is best not to reset the strategy, otherwise there may be a risk of some connections crashing. Then, here, parameter control is used.
+   if [[ "$params" =~ "--flush-ipset" ]]; then
+      echo "ipset flush permit-subnets-ipv4" >> ${WORKING_DIRECTORY}/.preventive-allow-script
+      echo "ipset flush permit-subnets-ipv6" >> ${WORKING_DIRECTORY}/.preventive-allow-script
+   fi
 
-   for i in ${DOCKER_NETWORK_SUBNETS_IPV4[@]} ${CLUSTER_CIDR_IPV4[@]} ${SERVICE_CIDR_IPV4[@]} ${KVM_SUBNET_ADDRESSES_IPV4[@]} ${VMWARE_SUBNET_ADDRESSES_IPV4[@]} ${LOOPBACK_SUBNETS_IPV4}; do
+   echo >> ${WORKING_DIRECTORY}/.preventive-allow-script
+   for i in ${DEFAULT_IPV4_ROUTE_ADDRESSES[@]} ${DOCKER_NETWORK_SUBNETS_IPV4[@]} ${CLUSTER_CIDR_IPV4[@]} ${SERVICE_CIDR_IPV4[@]} ${KVM_SUBNET_ADDRESSES_IPV4[@]} ${VMWARE_SUBNET_ADDRESSES_IPV4[@]} ${LOOPBACK_SUBNETS_IPV4}; do
       echo "ipset add permit-subnets-ipv4 $i" >> ${WORKING_DIRECTORY}/.preventive-allow-script
    done
 
-   for i in ${DOCKER_NETWORK_SUBNETS_IPV6[@]} ${CLUSTER_CIDR_IPV6[@]} ${SERVICE_CIDR_IPV6[@]} ${KVM_SUBNET_ADDRESSES_IPV6[@]} ${VMWARE_SUBNET_ADDRESSES_IPV6[@]} ${LOOPBACK_SUBNETS_IPV6}; do
+   echo >> ${WORKING_DIRECTORY}/.preventive-allow-script
+   for i in ${DEFAULT_IPV6_ROUTE_ADDRESSES[@]} ${DOCKER_NETWORK_SUBNETS_IPV6[@]} ${CLUSTER_CIDR_IPV6[@]} ${SERVICE_CIDR_IPV6[@]} ${KVM_SUBNET_ADDRESSES_IPV6[@]} ${VMWARE_SUBNET_ADDRESSES_IPV6[@]} ${LOOPBACK_SUBNETS_IPV6}; do
       echo "ipset add permit-subnets-ipv6 $i" >> ${WORKING_DIRECTORY}/.preventive-allow-script
    done
 
-   # TCP4/UDP4 OUTBOUND
-   echo "iptables -t raw -C PREROUTING -m set --match-set permit-subnets-ipv4 src -m comment --comment \"Unified Access Control\" -j ACCEPT || \\" >> ${WORKING_DIRECTORY}/.preventive-allow-script
-   echo "iptables -t raw -I PREROUTING -m set --match-set permit-subnets-ipv4 src -m comment --comment \"Unified Access Control\" -j ACCEPT" >> ${WORKING_DIRECTORY}/.preventive-allow-script
+   # Communications in TCP4/UDP4
+   echo >> ${WORKING_DIRECTORY}/.preventive-allow-script
+   echo "iptables -t raw -C PREROUTING -m set --match-set permit-subnets-ipv4 src -m set --match-set permit-subnets-ipv4 dst -m comment --comment \"${IPTABLES_COMMENT}\" -j ACCEPT || \\" >> ${WORKING_DIRECTORY}/.preventive-allow-script
+   echo "iptables -t raw -I PREROUTING -m set --match-set permit-subnets-ipv4 src -m set --match-set permit-subnets-ipv4 dst -m comment --comment \"${IPTABLES_COMMENT}\" -j ACCEPT" >> ${WORKING_DIRECTORY}/.preventive-allow-script
 
-   # TCP4/UDP4 INBOUND
-   echo "iptables -t raw -C PREROUTING -m set --match-set permit-subnets-ipv4 dst -m comment --comment \"Unified Access Control\" -j ACCEPT || \\" >> ${WORKING_DIRECTORY}/.preventive-allow-script
-   echo "iptables -t raw -I PREROUTING -m set --match-set permit-subnets-ipv4 dst -m comment --comment \"Unified Access Control\" -j ACCEPT" >> ${WORKING_DIRECTORY}/.preventive-allow-script
+   # Communications in TCP6/UDP6
+   echo >> ${WORKING_DIRECTORY}/.preventive-allow-script
+   echo "ip6tables -t raw -C PREROUTING -m set --match-set permit-subnets-ipv6 src -m set --match-set permit-subnets-ipv6 dst -m comment --comment \"${IPTABLES_COMMENT}\" -j ACCEPT || \\" >> ${WORKING_DIRECTORY}/.preventive-allow-script
+   echo "ip6tables -t raw -I PREROUTING -m set --match-set permit-subnets-ipv6 src -m set --match-set permit-subnets-ipv6 dst -m comment --comment \"${IPTABLES_COMMENT}\" -j ACCEPT" >> ${WORKING_DIRECTORY}/.preventive-allow-script
 
-   # TCP6/UDP6 OUTBOUND
-   echo "ip6tables -t raw -C PREROUTING -m set --match-set permit-subnets-ipv6 src -m comment --comment \"Unified Access Control\" -j ACCEPT || \\" >> ${WORKING_DIRECTORY}/.preventive-allow-script
-   echo "ip6tables -t raw -I PREROUTING -m set --match-set permit-subnets-ipv6 src -m comment --comment \"Unified Access Control\" -j ACCEPT" >> ${WORKING_DIRECTORY}/.preventive-allow-script
-
-   # TCP6/UDP6 INBOUND
-   echo "ip6tables -t raw -C PREROUTING -m set --match-set permit-subnets-ipv6 dst -m comment --comment \"Unified Access Control\" -j ACCEPT || \\" >> ${WORKING_DIRECTORY}/.preventive-allow-script
-   echo "ip6tables -t raw -I PREROUTING -m set --match-set permit-subnets-ipv6 dst -m comment --comment \"Unified Access Control\" -j ACCEPT" >> ${WORKING_DIRECTORY}/.preventive-allow-script
+   sed -i '/^$/N;/^\n$/D' ${WORKING_DIRECTORY}/.preventive-allow-script
 
    echo "[Info] The preventive iptables allow rules have been saved in ${WORKING_DIRECTORY}/.preventive-allow-script"
 }
