@@ -43,6 +43,11 @@
 # [23] Large scale cluster with multiple nodes for unified scheduling.
 # [24] Remote batch push
 # [25] 允许在历史连接摘要表的基础上进行策略更新，允许多次短时数据包捕获，同时允许对长期不活跃的连接策略予以回收。
+# [26] 在生成的iptables放通策略脚本中，添加目的端口策略描述，提升可读性；
+# [27] 在生成策略配置文件时，针对k8s核心组件的端口策略需特殊处理，如etcd端口策略、apiserver策略、vxlan端口捕获的数据包不能足以覆盖所有客户端；
+# [28] 兜底方案：因数据包分析和分析不全面导致疏漏的连接策略，在封堵后出现无法正常访问的情况，应实时流量观察，先放通再列入pending审查清单；
+# [29] 特权连接配置：增加 .legacy-connections，以满足维护需要。
+# [30] 蜜罐支持，对于一些常见暴露面如ssh，对于没有特权的IP，可以NAT到蜜罐容器
 
 #########################################
 # Verifications                         #
@@ -381,6 +386,17 @@ load_system_service_unit_file_path() {
    fi
 
    echo "[Info] The system service unit file path: ${SYSTEM_SERVICE_UNIT_FILE_PATH}"
+}
+
+load_vxlan_listen_addresses_from_file() {
+
+   if [ ! -f ${WORKING_DIRECTORY}/.vxlan-listen-addresses ] || [[ "${*}" =~ "--no-cache" ]]; then
+      ${WORKING_DIRECTORY}/network-utilities.sh --get-vxlan-listen-addresses
+   fi
+
+   VXLAN_IPV4_LISTEN_ADDRESSES=($(cat ${WORKING_DIRECTORY}/.vxlan-ipv4-listen-addresses 2>/dev/null))
+   VXLAN_IPV6_LISTEN_ADDRESSES=($(cat ${WORKING_DIRECTORY}/.vxlan-ipv6-listen-addresses 2>/dev/null))
+   VXLAN_LISTEN_ADDRESSES=($(cat ${WORKING_DIRECTORY}/.vxlan-listen-addresses 2>/dev/null))
 }
 
 
@@ -1187,6 +1203,7 @@ process_listening_exposures() {
    local temporaryFilePath_IPv4="$parentDirectory/$(echo $fileName | tr '0-9' '4').tmp"
    local temporaryFilePath_IPv6="$parentDirectory/$(echo $fileName | tr '0-9' '6').tmp"
    local k=
+   local protocol=$(echo "$fileName" | grep -oE 'tcp|udp')
 
    if [ -z "$filePath" ] || [ -z "$beginLineNo" ] || [ -z "$endLineNo" ]; then
       echo '[Warn] This function need 3 parameters: the iptables strategies file path, the begin line number and the end line number of this file.'
@@ -1197,17 +1214,24 @@ process_listening_exposures() {
 
       local listenHost=$(echo "$k" | awk '{print $1}' | sed 's#^\(.*\):[0-9]*$#\1#g')
       local listenPort=$(echo "$k" | awk '{print $1}' | sed 's#^.*:\([0-9]*\)$#\1#g')
+      local remoteHost=$(echo "$k" | awk '{print $2}')
+
+      # Filter out non-exposed ports
       if $(check_if_subnet_in_exposure "$listenHost"); then
+
+         local note=$(echo "$k" | awk '{for(i=3;i<=NF;i++) printf "%s ", $i; print ""}')
+         local portComment=$(grep -w "$listenPort/$protocol" /etc/services | sed 's#^\([^ ]*\).*\#\ \(.*\)#[\1] [\2]#')
+         note="$note$portComment"
+
          if [ "$listenHost" == "*" ]; then
             # The asterisk means listening on both IPv4 and IPv6 wildcard addresses simultaneously. Therefore, it is expanded into two listening records.
-            local remoteHost=$(echo "$k" | awk '{print $2}')
-            local note=$(echo "$k" | awk '{print $3}')
             echo "0.0.0.0:$listenPort $remoteHost $note" >> $temporaryFilePath_IPv4
             echo "[::]:$listenPort $remoteHost $note" >> $temporaryFilePath_IPv6
          else
-            echo $k >> $temporaryFilePath
+            echo "$listenHost:$listenPort $remoteHost $note" >> $temporaryFilePath
          fi
       fi
+
    done
 }
 
@@ -1225,8 +1249,11 @@ dump_listening_tables() {
    >${WORKING_DIRECTORY}/.udp6-listening-exposures
 
    if [ ${#EXTERNAL_IPV4_ADDRESSES[@]} -ne 0 ]; then
-      ss -4nltp -e | sed 's/%[^:]*:/:/g' | awk '{print $4,$5,$6}' | tail -n +2 >> ${WORKING_DIRECTORY}/.tcp4-listening-exposures
-      ss -4nlup -e | sed 's/%[^:]*:/:/g' | awk '{print $4,$5,$6}' | tail -n +2 >> ${WORKING_DIRECTORY}/.udp4-listening-exposures
+      # ss -4nltp -e | sed 's/%[^:]*:/:/g' | awk '{print $4,$5,$6}' | tail -n +2 >> ${WORKING_DIRECTORY}/.tcp4-listening-exposures
+      # ss -4nlup -e | sed 's/%[^:]*:/:/g' | awk '{print $4,$5,$6}' | tail -n +2 >> ${WORKING_DIRECTORY}/.udp4-listening-exposures
+      # [Fixed] Incomplete display of exposed surface information
+      ss -4nltp -e | sed 's/%[^:]*:/:/g' | awk '{for(i=4;i<=NF;i++) printf "%s ", $i; print ""}' | tail -n +2 >> ${WORKING_DIRECTORY}/.tcp4-listening-exposures
+      ss -4nlup -e | sed 's/%[^:]*:/:/g' | awk '{for(i=4;i<=NF;i++) printf "%s ", $i; print ""}' | tail -n +2 >> ${WORKING_DIRECTORY}/.udp4-listening-exposures
 
       local n_tcp4=$(wc -l ${WORKING_DIRECTORY}/.tcp4-listening-exposures | awk '{print $1}')
       local n_udp4=$(wc -l ${WORKING_DIRECTORY}/.udp4-listening-exposures | awk '{print $1}')
@@ -1236,8 +1263,10 @@ dump_listening_tables() {
    fi
 
    if [ ${#EXTERNAL_IPV6_ADDRESSES[@]} -ne 0 ]; then
-      ss -6nltp -e | sed 's/%[^:]*:/:/g' | awk '{print $4,$5,$6}' | tail -n +2 >> ${WORKING_DIRECTORY}/.tcp6-listening-exposures
-      ss -6nlup -e | sed 's/%[^:]*:/:/g' | awk '{print $4,$5,$6}' | tail -n +2 >> ${WORKING_DIRECTORY}/.udp6-listening-exposures
+      # ss -6nltp -e | sed 's/%[^:]*:/:/g' | awk '{print $4,$5,$6}' | tail -n +2 >> ${WORKING_DIRECTORY}/.tcp6-listening-exposures
+      # ss -6nlup -e | sed 's/%[^:]*:/:/g' | awk '{print $4,$5,$6}' | tail -n +2 >> ${WORKING_DIRECTORY}/.udp6-listening-exposures
+      ss -6nltp -e | sed 's/%[^:]*:/:/g' | awk '{for(i=4;i<=NF;i++) printf "%s ", $i; print ""}' | tail -n +2 >> ${WORKING_DIRECTORY}/.tcp6-listening-exposures
+      ss -6nlup -e | sed 's/%[^:]*:/:/g' | awk '{for(i=4;i<=NF;i++) printf "%s ", $i; print ""}' | tail -n +2 >> ${WORKING_DIRECTORY}/.udp6-listening-exposures
 
       local n_tcp6=$(wc -l ${WORKING_DIRECTORY}/.tcp6-listening-exposures | awk '{print $1}')
       local n_udp6=$(wc -l ${WORKING_DIRECTORY}/.udp6-listening-exposures | awk '{print $1}')
@@ -1768,6 +1797,10 @@ concurrently_run_packets_captures() {
    done
 }
 
+get_exposure_comments() {
+   :
+}
+
 #
 # [Note] Generate a network policy release script based on network connection summary data. Note that network connection summary is not equivalent to the actual address range that should be opened. Client IP addresses assigned dynamically may not be included in the current traffic collection data. For client addresses in primary and backup modes, the connection summary may not be complete and need to be manually identified.
 #
@@ -1793,6 +1826,7 @@ get_iptables_allow_rules_from_connections_summary() {
          fi
 
          echo "# Permission rules for $destinationHost:$destinationPort" >> ${WORKING_DIRECTORY}/.tcp4-exposures-allow-script
+         get_exposure_comments $destinationHost $destinationPort
 
          echo "ipset destroy allowed_tcp4_to_$destinationHost:$destinationPort" >> ${WORKING_DIRECTORY}/.tcp4-exposures-allow-script
 

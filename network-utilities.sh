@@ -863,7 +863,9 @@ get_k8s_nodes_ip_addresses() {
 #
 get_k8s_pods_inventory_view() {
 
-   kubectl get pod --all-namespaces --request-timeout=8s --no-headers -o custom-columns=NAMESPACE:metadata.namespace,NAME:metadata.name,HOSTIP:status.hostIP,POD_IP:status.podIP,IMAGE:spec.containers[*].image 2>/dev/null | awk '{print $1","$2","$3","$4","$5}' > .k8s-pods-inventory-view
+   kubectl get pod --all-namespaces --request-timeout=8s --no-headers -o custom-columns=NAMESPACE:metadata.namespace,NAME:metadata.name,HOSTIP:status.hostIP,POD_IP:status.podIP,IMAGE:spec.containers[*].image 2>/dev/null | awk '{print $1","$2","$3","$4","$5}' > ${WORKING_DIRECTORY}/.k8s-pods-inventory-view
+
+   echo "[Info] The K8s pods inventory view has been saved in ${WORKING_DIRECTORY}/.k8s-pods-inventory-view"
 }
 
 #
@@ -1292,6 +1294,93 @@ load_system_service_unit_file_path() {
    fi
 
    echo "[Info] The system service unit file path: ${SYSTEM_SERVICE_UNIT_FILE_PATH}"
+}
+
+#
+# [Note] This is the K8s cluster level method, which can only run on the master nodes, and the generated results need to be pushed to all nodes in the cluster.
+#
+get_calico_vxlan_listen_addresses() {
+
+   local i=
+   VXLAN_IPV4_LISTEN_ADDRESSES=()
+   VXLAN_IPV6_LISTEN_ADDRESSES=()
+   VXLAN_LISTEN_ADDRESSES=()
+
+   local vxlanConfigJson=$(kubectl get felixconfigurations --all-namespaces --request-timeout=8s -o json 2>/dev/null | jq -r -c '.items | map({
+      ipv6Support: (.spec.ipv6Support // false),
+      vxlanPort: (.spec.vxlanPort // 4789)
+   })')
+
+   if [ -z "$vxlanConfigJson" ]; then
+      echo '[Warn] Cannot obtain vxlan configurations from calico resources.'
+      return
+   fi
+
+   for i in $(echo "$vxlanConfigJson" | jq -r -c '.[]'); do
+
+      local ipv6Support=$(echo "$i" | jq -r '.ipv6Support')
+      local vxlanPort=$(echo "$i" | jq -r '.vxlanPort')
+
+      # vxlan can only listen on wildcard addresses
+      VXLAN_IPV4_LISTEN_ADDRESSES=(${VXLAN_IPV4_LISTEN_ADDRESSES[@]} "0.0.0.0:$vxlanPort")
+      if [ "$ipv6Support" == "true" ]; then
+         VXLAN_IPV6_LISTEN_ADDRESSES=(${VXLAN_IPV6_LISTEN_ADDRESSES[@]} "[::]:$vxlanPort")
+      fi
+
+   done
+
+   # [Note] Due to the fact that the spec.deviceRouteSourceAddress and spec.deviceRouteSourceAddressIPv6 property can specify different source addresses and there may be multiple felixconfiguration objects with different values for deviceRouteSourceAddress but the same value for .spec.vxlanPort, duplicate entries need to be removed.
+   VXLAN_IPV4_LISTEN_ADDRESSES=($(echo "${VXLAN_IPV4_LISTEN_ADDRESSES[@]}" | tr ' ' '\n' | sort -u))
+   VXLAN_IPV6_LISTEN_ADDRESSES=($(echo "${VXLAN_IPV6_LISTEN_ADDRESSES[@]}" | tr ' ' '\n' | sort -u))
+   VXLAN_LISTEN_ADDRESSES=(${VXLAN_IPV4_LISTEN_ADDRESSES[@]} ${VXLAN_IPV6_LISTEN_ADDRESSES[@]})
+
+   if [ ${#VXLAN_IPV4_LISTEN_ADDRESSES[@]} -ne 0 ]; then
+      echo "${VXLAN_IPV4_LISTEN_ADDRESSES[@]}" | tr ' ' '\n' > ${WORKING_DIRECTORY}/.vxlan-ipv4-listen-addresses
+   fi
+
+   if [ ${#VXLAN_IPV6_LISTEN_ADDRESSES[@]} -ne 0 ]; then
+      echo "${VXLAN_IPV6_LISTEN_ADDRESSES[@]}" | tr ' ' '\n' > ${WORKING_DIRECTORY}/.vxlan-ipv6-listen-addresses
+   fi
+
+   if [ ${#VXLAN_LISTEN_ADDRESSES[@]} -ne 0 ]; then
+      echo "${VXLAN_LISTEN_ADDRESSES[@]}" | tr ' ' '\n' > ${WORKING_DIRECTORY}/.vxlan-listen-addresses
+   fi
+}
+
+#
+# [Note] This the host level method, which can be run on any nodes.
+#
+get_vxlan_listen_addresses() {
+   
+   get_default_route_ip_addresses
+
+   if [ ${#DEFAULT_IPV4_ROUTE_ADDRESSES[@]} -eq 0 ]; then
+      local ipv4Filter=$(echo ${DEFAULT_IPV4_ROUTE_ADDRESSES[@]} | tr ' ' '\n' | sed 's#^#dst host #g' | sed ':a;N;$!ba;s/\n/ or /g')
+
+      >${WORKING_DIRECTORY}/.vxlan-packets
+      echo '[Info] Begin to analyze vxlan packets ...'
+      timeout 5 tcpdump -i any -lqnn -c 1000 "ip and udp and (udp[8] & 0x08) = 0x08 and ( $ipv4Filter )" | while read line; do
+         echo "$line" >> ${WORKING_DIRECTORY}/.vxlan-packets
+      done
+
+      sed 's#.*> [0-9.]*\.\([0-9]*\):.*#0.0.0.0:\1#g' ${WORKING_DIRECTORY}/.vxlan-packets | sort -u > ${WORKING_DIRECTORY}/.vxlan-ipv4-listen-addresses
+
+      /usr/bin/rm -f ${WORKING_DIRECTORY}/.vxlan-packets
+   fi
+   
+   if [ ${#DEFAULT_IPV6_ROUTE_ADDRESSES[@]} -eq 0 ]; then
+      local ipv6Filter=$(echo ${DEFAULT_IPV6_ROUTE_ADDRESSES[@]} | tr ' ' '\n' | sed 's#^#dst host #g' | sed ':a;N;$!ba;s/\n/ or /g')
+
+      >${WORKING_DIRECTORY}/.vxlan-packets
+      echo '[Info] Begin to analyze vxlan packets ...'
+      timeout 5 tcpdump -i any -lqnn -c 1000 "ip6 and udp and (udp[8] & 0x08) = 0x08 and ( $ipv6Filter )" | while read line; do
+         echo "$line" >> ${WORKING_DIRECTORY}/.vxlan-packets
+      done
+
+      sed 's#.*> .*\.\([0-9]*\):.*#[::]:\1#g' ${WORKING_DIRECTORY}/.vxlan-packets | sort -u > ${WORKING_DIRECTORY}/.vxlan-ipv6-listen-addresses
+   fi
+
+   cat ${WORKING_DIRECTORY}/.vxlan-ipv4-listen-addresses ${WORKING_DIRECTORY}/.vxlan-ipv6-listen-addresses > ${WORKING_DIRECTORY}/.vxlan-listen-addresses
 }
 
 #
