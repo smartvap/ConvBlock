@@ -837,6 +837,22 @@ check_if_subnet_in_exposure() {
 }
 
 #
+# [Note] This method is used to directly obtain the annotation information of jump linked lists in DNAT strategies, and is commonly used for link tracing in K8s services.
+#
+get_comments_of_dnat_exposure() {
+   
+   local linkName=$1
+
+   if [ -z "$linkName" ]; then
+      return
+   fi
+
+   if [[ "$linkName" =~ "KUBE-SVC" ]] || [[ "$linkName" =~ "KUBE-SEP" ]]; then
+      iptables -t nat -S $linkName -w 2>/dev/null | grep -v -w '\-N' | grep -v 'MARK' | head -1 | sed 's#.*--comment "\([^"]*\)".*#\1#g'
+   fi
+}
+
+#
 # [Note] Single process processing of iptables port forwarding policies dump file specified by parameter 1. The starting and ending lines of the next two parameters indicate the scope of the processed file content.
 #
 process_dnat_exposures() {
@@ -872,6 +888,9 @@ process_dnat_exposures() {
       if ! $result; then
          continue
       fi
+
+      # [Note] Convert obscure KUBE-SVC* and KUBE-SEP* into annotations
+      to=$(get_comments_of_dnat_exposure "$to")
 
       # CIDR Suffix Omission: In IPv4, /32 means that this IP address has no network part and the entire 32 bits are used for host identification. Both represent precise individual IP addresses, so they are omitted to ensure consistency with the TCP/UDP listening table.
       if [[ "$source" =~ "/32" ]] || [[ "$source" =~ "/128" ]]; then
@@ -1798,7 +1817,97 @@ concurrently_run_packets_captures() {
 }
 
 get_exposure_comments() {
-   :
+   
+   local destinationHost=$1
+   local destinationPort=$2
+
+   if [ -z "$destinationHost" ] || [ -z "$destinationPort" ]; then
+      return
+   fi
+
+   # 1. Query in DNAT exposures
+   if [ ! -f ${WORKING_DIRECTORY}/.tcp4-dnat-exposures ]; then
+      return
+   fi
+
+   for i in $(cat ${WORKING_DIRECTORY}/.tcp4-dnat-exposures); do
+      local dnatHost=$(echo "$i" | awk -F; '{print $2}')
+      local dnatPort=$(echo "$i" | awk -F; '{print $3}')
+      local jumpTo=$(echo "$i" | awk -F; '{print $4}')
+
+      if [ "$destinationPort" == "$dnatPort" ]; then
+
+         local match=$(python3 ${WORKING_DIRECTORY}/network-utilities.py --check-ip-in-pools "$destinationHost" "$dnatHost")
+
+         if $match; then
+            echo "$jumpTo"
+            return
+         fi
+      fi
+   done
+
+   # 2. Query in listening exposures
+   grep -E "^$destinationHost$destinationPort|^0.0.0.0:$destinationPort" ${WORKING_DIRECTORY}/.tcp4-listening-exposures | head -1 | awk '{for(i=3;i<=NF;i++) printf "%s ", $i; print ""}'
+}
+
+#
+# [Note] Generate ipset update scripts
+#
+get_ipset_config_scripts() {
+
+   local protocol=$1
+   local destinationHost=$2
+   local destinationPort=$3
+   local sourceHosts=("${@:4}")
+   local ipsetName="allowed_tcp4_to_$destinationHost:$destinationPort"
+
+   load_k8s_nodes_ip_addresses_from_file
+
+   # ipset configurations only appears during the strategy creation phase
+   local scriptPath=${WORKING_DIRECTORY}/.$protocol-exposures-allow-script
+
+   if [ -z "$protocol" ] || [ -z "$destinationHost" ] || [ -z "$destinationPort" ] || [ ${#sourceHosts[@]} -eq 0 ]; then
+      echo '[Warn] Please provide valid parameters: <protocol: tcp4|udp4|tcp6|udp6> <destinationHost> <destinationPort> <sourceHosts ..>'
+      return
+   fi
+
+   # [Fixed] It is not recommended to directly delete ipset during daily maintenance, as iptables strategies may lock ipset and cause deletion failure. Exposed surface recycling, which has not occurred for a long time, can trigger the removal of iptables and ipset policies.
+   if $(ipset list $ipsetName 1>/dev/null 2>/dev/null); then
+      # Clearing ipset and restoring it in a timely manner theoretically can cause network connection interruptions
+      echo "ipset flush $ipsetName" >> $scriptPath
+   else
+      echo "ipset create $ipsetName hash:ip" >> $scriptPath
+   fi
+
+   # Supplement on the basis of [sourceHosts]
+   # 1. Supplementary privileged/legacy connections strategies, the .legacy-connections file format is <legacy-client-ip>,<destination-server-ip>:<destination-server-port> # <the comments>
+   local legacyClients=($(awk '{print $1}' .legacy-connections | awk -F, '{print $2,$1}' | group_by_1st_column_no_limit | grep "^$destinationHost:$destinationPort" | tr ',' '\n'))
+
+   # 2. Supplement special port strategy
+   # Check if sourceHosts contains K8s nodes IP addresses
+   local -A seen
+   local elem=
+   local hasIntersection=false
+
+   for elem in ${K8S_NODES_IP_ADDRESSES[@]}; do
+      seen["$elem"]=1
+   done
+
+   for elem in "${sourceHosts[@]}"; do
+      if [[ ${seen["$elem"]} ]]; then
+         hasIntersection=true
+         break
+      fi
+   done
+
+   if $hasIntersection; then
+      sourceHosts=(${sourceHosts[@]} ${K8S_NODES_IP_ADDRESSES})
+      sourceHosts=($(echo ${sourceHosts[@]} | tr ' ' '\n' | sort -u))
+   fi
+
+   # Write to scripts file
+   # [Note] 补充策略会导致策略冗余，但这是不得已而为之，首先要说的就是K8s节点可能有虚拟分区的概念，即通过设置污点进行强制隔离的节点分组，承担不同的业务，组与组之间没有容器交互，因此也就无需VXLAN互通，但实际上这里全面放开了VXLAN互通，用户可以在后续通过不同组的策略隔离实现
+
 }
 
 #
@@ -1826,12 +1935,14 @@ get_iptables_allow_rules_from_connections_summary() {
          fi
 
          echo "# Permission rules for $destinationHost:$destinationPort" >> ${WORKING_DIRECTORY}/.tcp4-exposures-allow-script
-         get_exposure_comments $destinationHost $destinationPort
+         
+         # Get and append strategy comments
+         local comments=$(get_exposure_comments $destinationHost $destinationPort)
+         echo "# $comments" >> ${WORKING_DIRECTORY}/.tcp4-exposures-allow-script
 
-         echo "ipset destroy allowed_tcp4_to_$destinationHost:$destinationPort" >> ${WORKING_DIRECTORY}/.tcp4-exposures-allow-script
+         get_ipset_config_scripts $protocol $destinationHost $destinationPort "${sourceHosts[@]}"
 
-         echo "ipset create allowed_tcp4_to_$destinationHost:$destinationPort hash:ip" >> ${WORKING_DIRECTORY}/.tcp4-exposures-allow-script
-
+         # 
          for j in ${sourceHosts[@]}; do
             echo "ipset add allowed_tcp4_to_$destinationHost:$destinationPort $j" >> ${WORKING_DIRECTORY}/.tcp4-exposures-allow-script
          done
