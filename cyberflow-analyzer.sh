@@ -481,40 +481,57 @@ group_by_1st_column() {
 #
 group_by_1st_column_no_limit() {
    awk '
-   {
-      # De duplication: Each second column value corresponding to the first column is only recorded once
-      if (!seen[$1","$2]++) {
-         # Record values and mark the need for sorting
-         value_count[$1]++
-         values[$1][value_count[$1]] = $2
-      }
+   BEGIN {
+     OFS = " "
    }
+   {
+      if (!seen[$1,$2]++) {
+         arr[$1] = (arr[$1] == "" ? $2 : arr[$1] "," $2)
+      }
+   } 
    END {
-      # Traverse all groups
-      for (key in values) {
-         count = 0
-         group_index = 1
-         result = ""
-         
-         # Sort values numerically
-         n = value_count[key]
-         for (i = 1; i <= n; i++) {
-            temp_arr[i] = values[key][i]
-         }
-         asort(temp_arr, sorted_values)
-         
-         # Build group output
-         for (i = 1; i <= n; i++) {
-            if (count++ > 0) result = result ","
-            result = result sorted_values[i]
-         }
-         
-         if (count > 0) {
-            print key " " result
-         }
+      for (key in arr) {
+         print key, arr[key]
       }
    }'
 }
+
+# group_by_1st_column_no_limit() {
+#    awk '
+#    {
+#       # De duplication: Each second column value corresponding to the first column is only recorded once
+#       if (!seen[$1","$2]++) {
+#          # Record values and mark the need for sorting
+#          value_count[$1]++
+#          values[$1][value_count[$1]] = $2
+#       }
+#    }
+#    END {
+#       # Traverse all groups
+#       for (key in values) {
+#          count = 0
+#          group_index = 1
+#          result = ""
+         
+#          # Sort values numerically
+#          n = value_count[key]
+#          for (i = 1; i <= n; i++) {
+#             temp_arr[i] = values[key][i]
+#          }
+#          asort(temp_arr, sorted_values)
+         
+#          # Build group output
+#          for (i = 1; i <= n; i++) {
+#             if (count++ > 0) result = result ","
+#             result = result sorted_values[i]
+#          }
+         
+#          if (count > 0) {
+#             print key " " result
+#          }
+#       }
+#    }'
+# }
 
 #
 # [Note] This operation is in high dangerous
@@ -1568,6 +1585,9 @@ preventive_iptables_allow_rules() {
    echo "[Info] The preventive iptables allow rules have been saved in ${WORKING_DIRECTORY}/.preventive-allow-script"
 }
 
+#
+# [Note] Generate packet filtering conditions based on the merged exposed surface files
+#
 get_packets_filter_file_by_exposures () {
 
    # Load private client subnets of current host. It should be noted that service CIDR can only be used as the destination, not as the client. In addition, traffic capture will be performed on external network interfaces rather than [any], so the filtering conditions for the loopback network can be ignored.
@@ -1575,7 +1595,9 @@ get_packets_filter_file_by_exposures () {
    load_cluster_cidr_from_file
    load_kvm_subnet_addresses_from_file
    load_vmware_subnet_addresses_from_file
-   load_k8s_nodes_ip_addresses_from_file
+
+   # [Fixed] It is a difficult decision whether the traffic between nodes within the K8s cluster should be captured and whether it should be released by default. If released by default, it will inevitably increase the risk exposure surface. If a node in the cluster is breached, it may bring significant security risks to the entire cluster. If policy convergence, i.e. strong blocking strategy, is also required within the cluster, it will result in an increase in the number of subsequent iptables policies and pose performance risks.
+   # load_k8s_nodes_ip_addresses_from_file
 
    # [1] TCP4 filters
    if [ -f ${WORKING_DIRECTORY}/.tcp4-exposures ] && [ -s ${WORKING_DIRECTORY}/.tcp4-exposures ]; then
@@ -1724,7 +1746,10 @@ run_capture_and_summarize_connections() {
       exit -1
    fi
 
-   >$connectionSummaryPath
+   # By default, historical data will be retained, allowing for long-term and multiple traffic summaries
+   if ${RESET_CONNECTIONS_SUMMARY_HISTORY}; then
+      >$connectionSummaryPath
+   fi
 
    eval "$tcpdumpScript" 2>/dev/null | while IFS= read -r line; do
       
@@ -1812,32 +1837,40 @@ concurrently_run_packets_captures() {
    local tcpdumpScript=
 
    for tcpdumpScript in $(cat ${WORKING_DIRECTORY}/.packets-capture-scripts); do
+
+      local processNumber=$(ps -ef | grep "$tcpdumpScript" | grep -v grep | wc -l)
+      if [ $processNumber -ne 0 ]; then
+         echo '[Warn] There are still unfinished packet capture processes.'
+         continue
+      fi
+
       nohup $0 --run-capture-and-summarize-connections "$tcpdumpScript" &
    done
 }
 
 get_exposure_comments() {
    
-   local destinationHost=$1
-   local destinationPort=$2
+   local protocol=$1
+   local destinationHost=$2
+   local destinationPort=$3
 
-   if [ -z "$destinationHost" ] || [ -z "$destinationPort" ]; then
+   if [ -z "$protocol" ] || [ -z "$destinationHost" ] || [ -z "$destinationPort" ]; then
       return
    fi
 
    # 1. Query in DNAT exposures
-   if [ ! -f ${WORKING_DIRECTORY}/.tcp4-dnat-exposures ]; then
+   if [ ! -f ${WORKING_DIRECTORY}/.$protocol-dnat-exposures ]; then
       return
    fi
 
-   for i in $(cat ${WORKING_DIRECTORY}/.tcp4-dnat-exposures); do
-      local dnatHost=$(echo "$i" | awk -F; '{print $2}')
-      local dnatPort=$(echo "$i" | awk -F; '{print $3}')
-      local jumpTo=$(echo "$i" | awk -F; '{print $4}')
+   for i in $(cat ${WORKING_DIRECTORY}/.$protocol-dnat-exposures); do
+      local dnatHost=$(echo "$i" | awk -F';' '{print $2}')
+      local dnatPort=$(echo "$i" | awk -F';' '{print $3}')
+      local jumpTo=$(echo "$i" | awk -F';' '{print $4}')
 
       if [ "$destinationPort" == "$dnatPort" ]; then
 
-         local match=$(python3 ${WORKING_DIRECTORY}/network-utilities.py --check-ip-in-pools "$destinationHost" "$dnatHost")
+         local match=$(python3 ${WORKING_DIRECTORY}/network-utilities.py --check-ip-in-pools "$destinationHost" "$dnatHost" | tr '[:upper:]' '[:lower:]')
 
          if $match; then
             echo "$jumpTo"
@@ -1847,7 +1880,7 @@ get_exposure_comments() {
    done
 
    # 2. Query in listening exposures
-   grep -E "^$destinationHost$destinationPort|^0.0.0.0:$destinationPort" ${WORKING_DIRECTORY}/.tcp4-listening-exposures | head -1 | awk '{for(i=3;i<=NF;i++) printf "%s ", $i; print ""}'
+   grep -E "^$destinationHost:$destinationPort|^0.0.0.0:$destinationPort" ${WORKING_DIRECTORY}/.$protocol-listening-exposures | head -1 | awk '{for(i=3;i<=NF;i++) printf "%s ", $i; print ""}'
 }
 
 #
@@ -1859,14 +1892,22 @@ get_ipset_config_scripts() {
    local destinationHost=$2
    local destinationPort=$3
    local sourceHosts=("${@:4}")
-   local ipsetName="allowed_tcp4_to_$destinationHost:$destinationPort"
+   local ipsetName='allowed_'$protocol'_to_'$destinationHost':'$destinationPort
+   local ipFamily=$(echo "$protocol" | grep -oE '4|6')
+   local ipsetSuffix="$([ $ipFamily -eq 6 ] && echo ' family inet6')"
+   local k8sNodes=()
 
    load_k8s_nodes_ip_addresses_from_file
+   if [ $ipFamily -eq 4 ]; then
+      k8sNodes=(${K8S_NODES_IPV4_ADDRESSES[@]})
+   elif [ $ipFamily -eq 6 ]; then
+      k8sNodes=(${K8S_NODES_IPV6_ADDRESSES[@]})
+   fi
 
    # ipset configurations only appears during the strategy creation phase
    local scriptPath=${WORKING_DIRECTORY}/.$protocol-exposures-allow-script
 
-   if [ -z "$protocol" ] || [ -z "$destinationHost" ] || [ -z "$destinationPort" ] || [ ${#sourceHosts[@]} -eq 0 ]; then
+   if [ -z "$protocol" ] || [ -z "$destinationHost" ] || [ -z "$destinationPort" ] || [ ${#sourceHosts[@]} -eq 0 ] || [ -z "$ipFamily" ]; then
       echo '[Warn] Please provide valid parameters: <protocol: tcp4|udp4|tcp6|udp6> <destinationHost> <destinationPort> <sourceHosts ..>'
       return
    fi
@@ -1876,20 +1917,22 @@ get_ipset_config_scripts() {
       # Clearing ipset and restoring it in a timely manner theoretically can cause network connection interruptions
       echo "ipset flush $ipsetName" >> $scriptPath
    else
-      echo "ipset create $ipsetName hash:ip" >> $scriptPath
+      echo "ipset create $ipsetName hash:ip$ipsetSuffix" >> $scriptPath
    fi
 
    # Supplement on the basis of [sourceHosts]
-   # 1. Supplementary privileged/legacy connections strategies, the .legacy-connections file format is <legacy-client-ip>,<destination-server-ip>:<destination-server-port> # <the comments>
-   local legacyClients=($(awk '{print $1}' .legacy-connections | awk -F, '{print $2,$1}' | group_by_1st_column_no_limit | grep "^$destinationHost:$destinationPort" | tr ',' '\n'))
+   # 1. Supplementary privileged/legacy connections strategies, the .legacy-connections file format is <legacy-client-ip>,<destination-server-ip>:<destination-server-port>,<protocol> # <the comments>
+   # [Example] 192.168.0.1,192.168.0.2:38800,tcp4   # Account Service
+   local legacyClients=($(awk '{print $1}' ${WORKING_DIRECTORY}/.legacy-connections | grep -w "$protocol" | awk -F, '{print $2,$1}' | group_by_1st_column_no_limit | grep "^$destinationHost:$destinationPort" | awk '{print $2}' | tr ',' '\n'))
+   sourceHosts=(${sourceHosts[@]} ${legacyClients[@]})
 
    # 2. Supplement special port strategy
-   # Check if sourceHosts contains K8s nodes IP addresses
+   # [Note] Check if sourceHosts contains K8s nodes IP addresses. Equivalent to: There is an intersection between the source address set in the "Connections Summary" and the K8s cluster address set. Based on the possibility that the client source on the K8s cluster address is dynamic, it needs to be extended to the entire K8s cluster address, which is the union of the two sets mentioned above.
    local -A seen
    local elem=
    local hasIntersection=false
 
-   for elem in ${K8S_NODES_IP_ADDRESSES[@]}; do
+   for elem in ${k8sNodes[@]}; do
       seen["$elem"]=1
    done
 
@@ -1901,13 +1944,20 @@ get_ipset_config_scripts() {
    done
 
    if $hasIntersection; then
-      sourceHosts=(${sourceHosts[@]} ${K8S_NODES_IP_ADDRESSES})
-      sourceHosts=($(echo ${sourceHosts[@]} | tr ' ' '\n' | sort -u))
+      # The union of connections summary and K8s nodes
+      sourceHosts=(${sourceHosts[@]} ${k8sNodes[@]})
    fi
 
-   # Write to scripts file
-   # [Note] 补充策略会导致策略冗余，但这是不得已而为之，首先要说的就是K8s节点可能有虚拟分区的概念，即通过设置污点进行强制隔离的节点分组，承担不同的业务，组与组之间没有容器交互，因此也就无需VXLAN互通，但实际上这里全面放开了VXLAN互通，用户可以在后续通过不同组的策略隔离实现
+   # Remove duplicates
+   sourceHosts=($(echo ${sourceHosts[@]} | tr ' ' '\n' | sort -u))
 
+   # Write to scripts file
+   # [Note] Supplementing strategies may lead to policy redundancy, but this is a last resort. Firstly, it should be noted that K8s nodes may have the concept of virtual partitions, which are nodes that are forcibly isolated by setting taints to undertake different businesses. There is no container interaction between groups, so there is no need for VXLAN interoperability. However, in reality, VXLAN interoperability has been fully opened up here, and users can achieve it through policy isolation of different groups in the future.
+
+   # Encapsulate the ipset restore command
+   echo 'echo "' >> $scriptPath
+   echo "${sourceHosts[@]}" | tr ' ' '\n' | sed "s#^#   add $ipsetName #g" >> $scriptPath
+   echo '" | ipset restore' >> $scriptPath
 }
 
 #
@@ -1937,15 +1987,15 @@ get_iptables_allow_rules_from_connections_summary() {
          echo "# Permission rules for $destinationHost:$destinationPort" >> ${WORKING_DIRECTORY}/.tcp4-exposures-allow-script
          
          # Get and append strategy comments
-         local comments=$(get_exposure_comments $destinationHost $destinationPort)
+         local comments=$(get_exposure_comments 'tcp4' $destinationHost $destinationPort)
          echo "# $comments" >> ${WORKING_DIRECTORY}/.tcp4-exposures-allow-script
 
-         get_ipset_config_scripts $protocol $destinationHost $destinationPort "${sourceHosts[@]}"
+         get_ipset_config_scripts 'tcp4' $destinationHost $destinationPort "${sourceHosts[@]}"
 
-         # 
-         for j in ${sourceHosts[@]}; do
-            echo "ipset add allowed_tcp4_to_$destinationHost:$destinationPort $j" >> ${WORKING_DIRECTORY}/.tcp4-exposures-allow-script
-         done
+         # The efficiency of sequentially adding ipset entries is low, and executing them during peak production periods will result in longer connection interruption times.
+         # for j in ${sourceHosts[@]}; do
+         #    echo "ipset add allowed_tcp4_to_$destinationHost:$destinationPort $j" >> ${WORKING_DIRECTORY}/.tcp4-exposures-allow-script
+         # done
 
          echo "iptables -t raw -C PREROUTING -p tcp -m set --match-set allowed_tcp4_to_$destinationHost:$destinationPort src -d $destinationHost --dport $destinationPort -m comment --comment \"Unified Access Control\" -j ACCEPT || \\" >> ${WORKING_DIRECTORY}/.tcp4-exposures-allow-script
 
@@ -1975,13 +2025,19 @@ get_iptables_allow_rules_from_connections_summary() {
 
          echo "# Permission rules for $destinationHost:$destinationPort" >> ${WORKING_DIRECTORY}/.udp4-exposures-allow-script
 
-         echo "ipset destroy allowed_udp4_to_$destinationHost:$destinationPort" >> ${WORKING_DIRECTORY}/.udp4-exposures-allow-script
+         # Get and append strategy comments
+         local comments=$(get_exposure_comments 'udp4' $destinationHost $destinationPort)
+         echo "# $comments" >> ${WORKING_DIRECTORY}/.udp4-exposures-allow-script
 
-         echo "ipset create allowed_udp4_to_$destinationHost:$destinationPort hash:ip" >> ${WORKING_DIRECTORY}/.udp4-exposures-allow-script
+         get_ipset_config_scripts 'udp4' $destinationHost $destinationPort "${sourceHosts[@]}"
 
-         for j in ${sourceHosts[@]}; do
-            echo "ipset add allowed_udp4_to_$destinationHost:$destinationPort $j" >> ${WORKING_DIRECTORY}/.udp4-exposures-allow-script
-         done
+         # echo "ipset destroy allowed_udp4_to_$destinationHost:$destinationPort" >> ${WORKING_DIRECTORY}/.udp4-exposures-allow-script
+
+         # echo "ipset create allowed_udp4_to_$destinationHost:$destinationPort hash:ip" >> ${WORKING_DIRECTORY}/.udp4-exposures-allow-script
+
+         # for j in ${sourceHosts[@]}; do
+         #    echo "ipset add allowed_udp4_to_$destinationHost:$destinationPort $j" >> ${WORKING_DIRECTORY}/.udp4-exposures-allow-script
+         # done
 
          echo "iptables -t raw -C PREROUTING -p udp -m set --match-set allowed_udp4_to_$destinationHost:$destinationPort src -d $destinationHost --dport $destinationPort -m comment --comment \"Unified Access Control\" -j ACCEPT || \\" >> ${WORKING_DIRECTORY}/.udp4-exposures-allow-script
 
