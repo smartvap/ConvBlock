@@ -1623,6 +1623,8 @@ get_packets_filter_file_by_exposures () {
       echo -n ' and ( ' | tee -a .tcp4-exposures-packets-filter
       awk -F: '{a[$1]=a[$1]?a[$1]" or dst port "$2:$2} END{for(i in a) print "dst host "i" and ( dst port "a[i]" ) or"}' ${WORKING_DIRECTORY}/.tcp4-exposures | tr '\n' ' ' | sed 's# or $##g' | tee -a ${WORKING_DIRECTORY}/.tcp4-exposures-packets-filter
       echo -n ' )' | tee -a ${WORKING_DIRECTORY}/.tcp4-exposures-packets-filter
+
+      echo "[Info] TCP4 packets filter has been saved in ${WORKING_DIRECTORY}/.tcp4-exposures-packets-filter"
    fi
 
    # [2] UDP4 filters
@@ -1642,6 +1644,8 @@ get_packets_filter_file_by_exposures () {
       echo -n ' and ( ' | tee -a ${WORKING_DIRECTORY}/.udp4-exposures-packets-filter
       awk -F: '{a[$1]=a[$1]?a[$1]" or dst port "$2:$2} END{for(i in a) print "dst host "i" and ( dst port "a[i]" ) or"}' ${WORKING_DIRECTORY}/.udp4-exposures | tr '\n' ' ' | sed 's# or $##g' | tee -a ${WORKING_DIRECTORY}/.udp4-exposures-packets-filter
       echo -n ' )' | tee -a ${WORKING_DIRECTORY}/.udp4-exposures-packets-filter
+
+      echo "[Info] UDP4 packets filter has been saved in ${WORKING_DIRECTORY}/.udp4-exposures-packets-filter"
    fi
 
    # [3] TCP6 filters
@@ -1661,6 +1665,8 @@ get_packets_filter_file_by_exposures () {
       echo -n ' and ( ' | tee -a .tcp6-exposures-packets-filter
       awk -F']:' '{addr = $1; port = $2; gsub(/^\[/, "", addr); a[addr]=a[addr]?a[addr]" or dst port "port:port} END{for(i in a) print "dst host "i" and ( dst port "a[i]" ) or"}' ${WORKING_DIRECTORY}/.tcp6-exposures | tr '\n' ' ' | sed 's# or $##g' | tee -a ${WORKING_DIRECTORY}/.tcp6-exposures-packets-filter
       echo -n ' )' | tee -a ${WORKING_DIRECTORY}/.tcp6-exposures-packets-filter
+
+      echo "[Info] TCP6 packets filter has been saved in ${WORKING_DIRECTORY}/.tcp6-exposures-packets-filter"
    fi
 
    # [4] UDP6 filters
@@ -1680,6 +1686,8 @@ get_packets_filter_file_by_exposures () {
       echo -n ' and ( ' | tee -a .udp6-exposures-packets-filter
       awk -F']:' '{addr = $1; port = $2; gsub(/^\[/, "", addr); a[addr]=a[addr]?a[addr]" or dst port "port:port} END{for(i in a) print "dst host "i" and ( dst port "a[i]" ) or"}' ${WORKING_DIRECTORY}/.udp6-exposures | tr '\n' ' ' | sed 's# or $##g' | tee -a ${WORKING_DIRECTORY}/.udp6-exposures-packets-filter
       echo -n ' )' | tee -a ${WORKING_DIRECTORY}/.udp6-exposures-packets-filter
+
+      echo "[Info] UDP6 packets filter has been saved in ${WORKING_DIRECTORY}/.udp6-exposures-packets-filter"
    fi
 }
 
@@ -1852,6 +1860,14 @@ concurrently_run_packets_captures() {
       fi
 
       nohup $0 --run-capture-and-summarize-connections "$tcpdumpScript" &
+   done
+
+   sleep 2
+
+   echo '[Info] The packets capture process are as below:'
+   for pid in $(ps -ef | grep '\--run-capture-and-summarize-connections' | awk '$3 == "1" {print $2}'); do
+      echo
+      pstree -lap $pid
    done
 }
 
@@ -2886,7 +2902,7 @@ show_iptables_traffic_meter() {
    [ -z "$tableName" ] && tableName='raw'
    [ -z "$linkName" ] && linkName='PREROUTING'
 
-   watch -n 5 -t "clear && iptables -t $tableName -L $linkName $lineNumber -nv --line-number"
+   clear && iptables -t $tableName -L $linkName $lineNumber -nv --line-number | grep 'Unified Access Control'
 }
 
 orderedPara=(
@@ -2913,6 +2929,8 @@ orderedPara=(
    "--generate-h3c-acl-scripts"
    "--create-observe-iptables-rejections-rsyslog-configurations"
    "--start-iptables-rejections-observer"
+   "--reset-iptables-traffic-meter"
+   "--show-iptables-traffic-meter"
    "--usage"
    "--help"
    "--manual"
@@ -2945,6 +2963,8 @@ declare -A mapParaFunc=(
    ["--generate-h3c-acl-scripts"]="generate_h3c_acl_scripts"
    ["--create-observe-iptables-rejections-rsyslog-configurations"]="create_observe_iptables_rejections_rsyslog_configurations"
    ["--start-iptables-rejections-observer"]="start_iptables_rejections_observer"
+   ["--reset-iptables-traffic-meter"]="reset_iptables_traffic_meter"
+   ["--show-iptables-traffic-meter"]="show_iptables_traffic_meter"
    ["--usage"]="usage"
    ["--help"]="usage"
    ["--manual"]="usage"
@@ -2977,6 +2997,8 @@ declare -A mapParaSpec=(
    ["--generate-h3c-acl-scripts"]="Generate H3C switch ACL configuration scripts. <usage> $0 --generate-h3c-acl-scripts <conn-summary-file> <tcp4/6|udp4/6> <inbound|outbound> <target-file>"
    ["--create-observe-iptables-rejections-rsyslog-configurations"]="Extract the iptables packets rejection logs from /var/log/messages to /var/log/iptables-observe.log"
    ["--start-iptables-rejections-observer"]="Start a daemon for iptables rejections observe."
+   ["--reset-iptables-traffic-meter"]="Reset the iptables traffic gauge."
+   ["--show-iptables-traffic-meter"]="Show the iptables traffic gauge."
    ["--usage"]="Simplified operation manual."
    ["--help"]="Simplified operation manual."
    ["--manual"]="Simplified operation manual."
