@@ -2023,14 +2023,15 @@ get_iptables_allow_rules_from_connections_summary() {
 
          get_ipset_config_scripts 'tcp4' $destinationHost $destinationPort "${sourceHosts[@]}"
 
-         # The efficiency of sequentially adding ipset entries is low, and executing them during peak production periods will result in longer connection interruption times.
+         # [Fix] The efficiency of sequentially adding ipset entries is low, and executing them during peak production periods will result in longer connection interruption times.
          # for j in ${sourceHosts[@]}; do
          #    echo "ipset add allowed_tcp4_to_$destinationHost:$destinationPort $j" >> ${WORKING_DIRECTORY}/.tcp4-exposures-allow-script
          # done
 
-         echo "iptables -t raw -C PREROUTING -p tcp -m set --match-set allow_$destinationHost:$destinationPort src -d $destinationHost --dport $destinationPort -m comment --comment \"Unified Access Control\" -j ACCEPT || \\" >> ${WORKING_DIRECTORY}/.tcp4-exposures-allow-script
+         # [Note] To ensure consistency in the scope of the allow and reject policies, for the TCP protocol, SYN packets should be uniformly allowed and rejected, with no constraints on other packets.
+         echo "iptables -t raw -C PREROUTING -p tcp -m set --match-set allow_$destinationHost:$destinationPort src -d $destinationHost --dport $destinationPort -m comment --comment \"Unified Access Control\" --syn -j ACCEPT || \\" >> ${WORKING_DIRECTORY}/.tcp4-exposures-allow-script
 
-         echo "iptables -t raw -I PREROUTING -p tcp -m set --match-set allow_$destinationHost:$destinationPort src -d $destinationHost --dport $destinationPort -m comment --comment \"Unified Access Control\" -j ACCEPT" >> ${WORKING_DIRECTORY}/.tcp4-exposures-allow-script
+         echo "iptables -t raw -I PREROUTING -p tcp -m set --match-set allow_$destinationHost:$destinationPort src -d $destinationHost --dport $destinationPort -m comment --comment \"Unified Access Control\" --syn -j ACCEPT" >> ${WORKING_DIRECTORY}/.tcp4-exposures-allow-script
 
          echo >> ${WORKING_DIRECTORY}/.tcp4-exposures-allow-script
 
@@ -2096,9 +2097,9 @@ get_iptables_allow_rules_from_connections_summary() {
 
          get_ipset_config_scripts 'tcp6' $destinationHost $destinationPort "${sourceHosts[@]}"
 
-         echo "ip6tables -t raw -C PREROUTING -p tcp -m set --match-set allow_$destinationHost:$destinationPort src -d $destinationHost --dport $destinationPort -m comment --comment \"Unified Access Control\" -j ACCEPT || \\" >> ${WORKING_DIRECTORY}/.tcp6-exposures-allow-script
+         echo "ip6tables -t raw -C PREROUTING -p tcp -m set --match-set allow_$destinationHost:$destinationPort src -d $destinationHost --dport $destinationPort -m comment --comment \"Unified Access Control\" --syn -j ACCEPT || \\" >> ${WORKING_DIRECTORY}/.tcp6-exposures-allow-script
 
-         echo "ip6tables -t raw -I PREROUTING -p tcp -m set --match-set allow_$destinationHost:$destinationPort src -d $destinationHost --dport $destinationPort -m comment --comment \"Unified Access Control\" -j ACCEPT" >> ${WORKING_DIRECTORY}/.tcp6-exposures-allow-script
+         echo "ip6tables -t raw -I PREROUTING -p tcp -m set --match-set allow_$destinationHost:$destinationPort src -d $destinationHost --dport $destinationPort -m comment --comment \"Unified Access Control\" --syn -j ACCEPT" >> ${WORKING_DIRECTORY}/.tcp6-exposures-allow-script
 
          echo >> ${WORKING_DIRECTORY}/.tcp6-exposures-allow-script
 
@@ -2261,13 +2262,15 @@ get_iptables_reject_rules_from_exposures() {
       sed 's#:#,tcp:#g' ${WORKING_DIRECTORY}/.tcp4-exposures | sed "s#^#   add $ipsetName #g" >> $scriptPath
       echo '" | ipset restore' >> $scriptPath
 
+      # Observer for rejected packets
       echo >> $scriptPath
-      echo "iptables -t raw -C PREROUTING -p tcp -m set --match-set $ipsetName dst,dst -m comment --comment \"Unified Access Control\" -j LOG --log-prefix \"RAW-DROP: \" || \\" >> $scriptPath
-      echo "iptables -t raw -A PREROUTING -p tcp -m set --match-set $ipsetName dst,dst -m comment --comment \"Unified Access Control\" -j LOG --log-prefix \"RAW-DROP: \"" >> $scriptPath
+      echo "iptables -t raw -C PREROUTING -p tcp -m set --match-set $ipsetName dst,dst -m comment --comment \"Unified Access Control\" --syn -j LOG --log-prefix \"RAW-DROP: \" || \\" >> $scriptPath
+      echo "iptables -t raw -A PREROUTING -p tcp -m set --match-set $ipsetName dst,dst -m comment --comment \"Unified Access Control\" --syn -j LOG --log-prefix \"RAW-DROP: \"" >> $scriptPath
 
+      # [Note] We block the three-way handshake by only blocking SYN packets, without blocking all data packets, because there may be ambiguity in the role of the listening port, that is, the role of the listening port can also be switched to the source port, causing SYN+ACK sent by external endpoints to the listening port to be mistakenly intercepted, thus affecting the outbound strategy.
       echo >> $scriptPath
-      echo "iptables -t raw -C PREROUTING -p tcp -m set --match-set $ipsetName dst,dst -m comment --comment \"Unified Access Control\" -j DROP || \\" >> $scriptPath
-      echo "iptables -t raw -A PREROUTING -p tcp -m set --match-set $ipsetName dst,dst -m comment --comment \"Unified Access Control\" -j DROP" >> $scriptPath
+      echo "iptables -t raw -C PREROUTING -p tcp -m set --match-set $ipsetName dst,dst -m comment --comment \"Unified Access Control\" --syn -j DROP || \\" >> $scriptPath
+      echo "iptables -t raw -A PREROUTING -p tcp -m set --match-set $ipsetName dst,dst -m comment --comment \"Unified Access Control\" --syn -j DROP" >> $scriptPath
 
       sed -i '/^$/N;/^\n$/D' $scriptPath
 
@@ -2296,6 +2299,7 @@ get_iptables_reject_rules_from_exposures() {
       echo "iptables -t raw -C PREROUTING -p udp -m set --match-set $ipsetName dst,dst -m comment --comment \"Unified Access Control\" -j LOG --log-prefix \"RAW-DROP: \" || \\" >> $scriptPath
       echo "iptables -t raw -A PREROUTING -p udp -m set --match-set $ipsetName dst,dst -m comment --comment \"Unified Access Control\" -j LOG --log-prefix \"RAW-DROP: \"" >> $scriptPath
 
+      # [Note] The UDP protocol does not have SYN packets, so it can only force the release of remote IP to the local listening port UDP policy when there is suspected port role ambiguity. Since it cannot be confirmed whether it is truly a port role switch, the UDP policy of remote IP+remote port to local port cannot be released. If the local port role is still the destination, the remote port will be a random port, which may cause policy inflation. If the local port role is switched to the source port, the remote port will be a fixed port, and releasing the remote IP+any port to the local port will cause policy redundancy.
       echo >> $scriptPath
       echo "iptables -t raw -C PREROUTING -p udp -m set --match-set $ipsetName dst,dst -m comment --comment \"Unified Access Control\" -j DROP || \\" >> $scriptPath
       echo "iptables -t raw -A PREROUTING -p udp -m set --match-set $ipsetName dst,dst -m comment --comment \"Unified Access Control\" -j DROP" >> $scriptPath
@@ -2324,12 +2328,12 @@ get_iptables_reject_rules_from_exposures() {
       echo '" | ipset restore' >> $scriptPath
 
       echo >> $scriptPath
-      echo "ip6tables -t raw -C PREROUTING -p tcp -m set --match-set $ipsetName dst,dst -m comment --comment \"Unified Access Control\" -j LOG --log-prefix \"RAW-DROP: \" || \\" >> $scriptPath
-      echo "ip6tables -t raw -A PREROUTING -p tcp -m set --match-set $ipsetName dst,dst -m comment --comment \"Unified Access Control\" -j LOG --log-prefix \"RAW-DROP: \"" >> $scriptPath
+      echo "ip6tables -t raw -C PREROUTING -p tcp -m set --match-set $ipsetName dst,dst -m comment --comment \"Unified Access Control\" --syn -j LOG --log-prefix \"RAW-DROP: \" || \\" >> $scriptPath
+      echo "ip6tables -t raw -A PREROUTING -p tcp -m set --match-set $ipsetName dst,dst -m comment --comment \"Unified Access Control\" --syn -j LOG --log-prefix \"RAW-DROP: \"" >> $scriptPath
 
       echo >> $scriptPath
-      echo "ip6tables -t raw -C PREROUTING -p tcp -m set --match-set $ipsetName dst,dst -m comment --comment \"Unified Access Control\" -j DROP || \\" >> $scriptPath
-      echo "ip6tables -t raw -A PREROUTING -p tcp -m set --match-set $ipsetName dst,dst -m comment --comment \"Unified Access Control\" -j DROP" >> $scriptPath
+      echo "ip6tables -t raw -C PREROUTING -p tcp -m set --match-set $ipsetName dst,dst -m comment --comment \"Unified Access Control\" --syn -j DROP || \\" >> $scriptPath
+      echo "ip6tables -t raw -A PREROUTING -p tcp -m set --match-set $ipsetName dst,dst -m comment --comment \"Unified Access Control\" --syn -j DROP" >> $scriptPath
 
       sed -i '/^$/N;/^\n$/D' $scriptPath
 
@@ -2959,6 +2963,17 @@ convert_iptables_strategies_to_nftables() {
    :
 }
 
+reset_all_protective_strategies() {
+   
+   for i in $(iptables -t raw -L PREROUTING -n --line-number | grep "${IPTABLES_COMMENT}" | awk '{print $1}' | sort -nr); do
+      iptables -t raw -D PREROUTING $i
+   done
+
+   for i in $(ip6tables -t raw -L PREROUTING -n --line-number | grep "${IPTABLES_COMMENT}" | awk '{print $1}' | sort -nr); do
+      ip6tables -t raw -D PREROUTING $i
+   done
+}
+
 #
 # [Note] Generate DNAT strategies from hidden file .dnat-connections. The file format is:
 # [
@@ -2968,6 +2983,16 @@ convert_iptables_strategies_to_nftables() {
 generate_dnat_strategies() {
 
    local scriptPath=${WORKING_DIRECTORY}/.dnat-script
+   local protocol=
+   local protoName=
+   local ipFamily=
+   local ipsetSuffix=
+   local iptablesPrefix=
+   local ipsetName=
+   local dstHost=
+   local dstPort=
+   local dnatHost=
+   local dnatPort=
 
    [ ! -f ${WORKING_DIRECTORY}/.dnat-connections ] && return
 
@@ -2985,16 +3010,21 @@ generate_dnat_strategies() {
       })
    ' ${WORKING_DIRECTORY}/.dnat-connections | jq -r -c '.[]'); do
 
+      # Ensure that the format is consistent in lowercase
       protocol=$(echo "$j" | jq -r -c '.PROTOCOL' | tr [:upper:] [:lower:])
       protoName=$(echo "$protocol" | grep -oE 'tcp|udp')
       ipFamily=$(echo "$protocol" | grep -oE '4|6')
       ipsetSuffix="$([ $ipFamily -eq 6 ] && echo 'family inet6')"
       iptablesPrefix=$(if [ $ipFamily -eq 4 ]; then echo iptables; elif [ $ipFamily -eq 6 ]; then echo ip6tables; fi)
       ipsetName=$(echo "$j" | jq -r -c '"allow_" + .DST_HOST + ":" + .DST_PORT')
-      dstHost=$(echo "$j" | jq -r -c '.DST_HOST')
+      # If it is an IPv6 address, remove any possible square brackets to ensure consistent formatting
+      dstHost=$(echo "$j" | jq -r -c '.DST_HOST' | sed 's#^\[\(.*\)\]$#\1#g') 
       dstPort=$(echo "$j" | jq -r -c '.DST_PORT')
-      dnatHost=$(echo "$j" | jq -r -c '.DNAT_HOST')
+      dnatHost=$(echo "$j" | jq -r -c '.DNAT_HOST' | sed 's#^\[\(.*\)\]$#\1#g')
       dnatPort=$(echo "$j" | jq -r -c '.DNAT_PORT')
+
+      # If it is an IPv6 address, make sure the --to-destination is [<IPv6>]:<Port> format
+      [ $ipFamily -eq 6 ] && dnatHost="[$dnatHost]"
 
       echo >> $scriptPath
       if $(ipset list $ipsetName 1>/dev/null 2>/dev/null); then
@@ -3008,8 +3038,8 @@ generate_dnat_strategies() {
       echo '" | ipset restore' >> $scriptPath
 
       echo >> $scriptPath
-      echo "$iptablesPrefix -t nat -C PREROUTING -p $protoName -m $protoName --dport $dstPort -d $dstHost -m set --match-set $ipsetName src -m comment --comment "${IPTABLES_COMMENT}" -j DNAT --to-destination $dnatHost:$dnatPort || \\" >> $scriptPath
-      echo "$iptablesPrefix -t nat -I PREROUTING -p $protoName -m $protoName --dport $dstPort -d $dstHost -m set --match-set $ipsetName src -m comment --comment "${IPTABLES_COMMENT}" -j DNAT --to-destination $dnatHost:$dnatPort || \\" >> $scriptPath
+      echo "$iptablesPrefix -t nat -C PREROUTING -p $protoName -m $protoName --dport $dstPort -d $dstHost -m set --match-set $ipsetName src -m comment --comment \"${IPTABLES_COMMENT}\" -j DNAT --to-destination $dnatHost:$dnatPort || \\" >> $scriptPath
+      echo "$iptablesPrefix -t nat -I PREROUTING -p $protoName -m $protoName --dport $dstPort -d $dstHost -m set --match-set $ipsetName src -m comment --comment \"${IPTABLES_COMMENT}\" -j DNAT --to-destination $dnatHost:$dnatPort" >> $scriptPath
    done
 
    sed -i '/^$/N;/^\n$/D' $scriptPath
@@ -3044,6 +3074,7 @@ orderedPara=(
    "--reset-iptables-traffic-meter"
    "--show-iptables-traffic-meter"
    "--save-effective-strategies"
+   "--generate-dnat-strategies"
    "--usage"
    "--help"
    "--manual"
@@ -3079,6 +3110,7 @@ declare -A mapParaFunc=(
    ["--reset-iptables-traffic-meter"]="reset_iptables_traffic_meter"
    ["--show-iptables-traffic-meter"]="show_iptables_traffic_meter"
    ["--save-effective-strategies"]="save_effective_strategies"
+   ["--generate-dnat-strategies"]="generate_dnat_strategies"
    ["--usage"]="usage"
    ["--help"]="usage"
    ["--manual"]="usage"
@@ -3114,6 +3146,7 @@ declare -A mapParaSpec=(
    ["--reset-iptables-traffic-meter"]="Reset the iptables traffic gauge."
    ["--show-iptables-traffic-meter"]="Show the iptables traffic gauge."
    ["--save-effective-strategies"]="Save effective strategies."
+   ["--generate-dnat-strategies"]="Generate DNAT strategies to achieve protections of sensitive ports, such as 22,3306,..."
    ["--usage"]="Simplified operation manual."
    ["--help"]="Simplified operation manual."
    ["--manual"]="Simplified operation manual."
