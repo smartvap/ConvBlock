@@ -1,0 +1,50 @@
+134.80.92.98,134.80.135.43:65522,tcp4   # Qiming He's Cloud Desk
+134.80.226.94,134.80.135.43:65522,tcp4  # Longrui Xin's Cloud Desk
+134.80.224.119,134.80.135.43:65522,tcp4 # Yanzhen Liu's Cloud Desk
+134.80.224.46,134.80.135.43:65522,tcp4  # Zhiwang Wei's Cloud Desk
+134.80.96.116,134.80.135.43:65522,tcp4  # Changyou Zhang's Cloud Desk
+134.85.25.107,134.80.135.43:22,tcp4     # Springboard of paragon ecological group
+134.85.25.107,134.80.135.43:65522,tcp4  # Springboard of paragon ecological group
+
+134.80.220.71,134.80.135.43:22,tcp4     # Bastion Hosts
+134.80.220.174,134.80.135.43:22,tcp4    # Bastion Hosts
+134.80.220.175,134.80.135.43:22,tcp4    # Bastion Hosts
+134.80.220.178,134.80.135.43:22,tcp4    # Bastion Hosts
+134.80.220.179,134.80.135.43:22,tcp4    # Bastion Hosts
+134.80.220.180,134.80.135.43:22,tcp4    # Bastion Hosts
+134.80.220.181,134.80.135.43:22,tcp4    # Bastion Hosts
+134.80.220.182,134.80.135.43:22,tcp4    # Bastion Hosts
+134.80.220.183,134.80.135.43:22,tcp4    # Bastion Hosts
+134.80.220.184,134.80.135.43:22,tcp4    # Bastion Hosts
+134.80.220.185,134.80.135.43:22,tcp4    # Bastion Hosts
+134.84.24.2,134.80.135.43:22,tcp4       # Bastion Hosts
+134.84.24.3,134.80.135.43:22,tcp4       # Bastion Hosts
+134.84.24.4,134.80.135.43:22,tcp4       # Bastion Hosts
+134.84.24.5,134.80.135.43:22,tcp4       # Bastion Hosts
+134.84.24.6,134.80.135.43:22,tcp4       # Bastion Hosts
+134.84.24.7,134.80.135.43:22,tcp4       # Bastion Hosts
+134.84.24.8,134.80.135.43:22,tcp4       # Bastion Hosts
+134.84.24.9,134.80.135.43:22,tcp4       # Bastion Hosts
+134.84.24.10,134.80.135.43:22,tcp4      # Bastion Hosts
+134.84.24.11,134.80.135.43:22,tcp4      # Bastion Hosts
+134.84.24.12,134.80.135.43:22,tcp4      # Bastion Hosts
+134.84.24.13,134.80.135.43:22,tcp4      # Bastion Hosts
+134.84.24.14,134.80.135.43:22,tcp4      # Bastion Hosts
+134.84.24.16,134.80.135.43:22,tcp4      # Bastion Hosts
+134.84.24.17,134.80.135.43:22,tcp4      # Bastion Hosts
+134.84.24.18,134.80.135.43:22,tcp4      # Bastion Hosts
+134.84.24.19,134.80.135.43:22,tcp4      # Bastion Hosts
+134.84.24.20,134.80.135.43:22,tcp4      # Bastion Hosts
+134.84.24.21,134.80.135.43:22,tcp4      # Bastion Hosts
+134.84.24.22,134.80.135.43:22,tcp4      # Bastion Hosts
+134.84.24.23,134.80.135.43:22,tcp4      # Bastion Hosts
+134.84.24.24,134.80.135.43:22,tcp4      # Bastion Hosts
+134.85.23.9,134.80.135.43:22,tcp4       # Bastion Hosts
+134.85.23.23,134.80.135.43:22,tcp4      # Bastion Hosts
+134.85.23.37,134.80.135.43:22,tcp4      # Bastion Hosts
+134.90.11.176,134.80.135.43:22,tcp4     # Bastion Hosts
+134.90.11.217,134.80.135.43:22,tcp4     # Bastion Hosts
+134.90.11.218,134.80.135.43:22,tcp4     # Bastion Hosts
+134.90.11.219,134.80.135.43:22,tcp4     # Bastion Hosts
+134.90.11.220,134.80.135.43:22,tcp4     # Bastion Hosts
+134.90.11.221,134.80.135.43:22,tcp4     # Bastion Hosts

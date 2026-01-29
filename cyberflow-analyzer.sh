@@ -49,7 +49,8 @@
 # [29] 特权连接配置：增加 .legacy-connections，以满足维护需要。[Done]
 # [30] 蜜罐支持，对于一些常见暴露面如ssh，对于没有特权的IP，可以NAT到蜜罐容器
 # [31] 注释需要同时从DNAT表和监听表中提取，若kube-proxy暴露的，直接从监听表提取。SSH Port Forwarding Policies 没取到。
-# [32] 策略使用率监控：iptables -t raw -L PREROUTING -nv --line-number，重置raw表计数器：iptables -t raw -Z PREROUTING <id>
+# [32] DNAT Connections Protections, using .dnat-connections with ipset, to protect some ports
+# [33] When the exposed listening port is randomly assigned as the source port of the session (TCP session initiator), the SYN+ACK returned by the destination end will be intercepted, and the probability of occurrence will increase as the number of host listening ports increases. Therefore, the compromise solution is: the iptables REJECT strategy only intercepts SYN inbound packets to avoid establishing a three-way handshake connection, but the existing problems are: 1) invalid for UDP sessions; 2) Invalid against flood attacks such as SYN+ACK.
 
 #########################################
 # Verifications                         #
@@ -1952,6 +1953,7 @@ get_ipset_config_scripts() {
    # Supplement on the basis of [sourceHosts]
    # 1. Supplementary privileged/legacy connections strategies, the .legacy-connections file format is <legacy-client-ip>,<destination-server-ip>:<destination-server-port>,<protocol> # <the comments>
    # [Example] 192.168.0.1,192.168.0.2:38800,tcp4   # Account Service
+   touch ${WORKING_DIRECTORY}/.legacy-connections
    local legacyClients=($(awk '{print $1}' ${WORKING_DIRECTORY}/.legacy-connections | grep -w "$protocol" | awk -F, '{print $2,$1}' | group_by_1st_column_no_limit | grep "^$destinationHost:$destinationPort" | awk '{print $2}' | tr ',' '\n'))
    sourceHosts=(${sourceHosts[@]} ${legacyClients[@]})
 
@@ -2833,45 +2835,35 @@ start_iptables_rejections_observer() {
          protocol=$(echo "$line" | grep -o 'PROTO=[A-Z]*' | cut -d= -f2 | tr '[:upper:]' '[:lower:]')
          dstPort=$(echo "$line" | grep -o 'DPT=[0-9]*' | cut -d= -f2)
 
-         adventure="$srcHost -> $dstHost:$dstPort ($protocol)"
+         # Risk release strategy
+         adventure="$srcHost → $dstHost:$dstPort [$protocol]"
 
-         echo "[Info] Blocked: $adventure"
-
-         # [1] Check if source IP in .blacklist
+         # Check if source IP in .blacklist
          i=$(grep -i "$srcHost" ${WORKING_DIRECTORY}/.blacklist 2>/dev/null | wc -l)
          if [ $i -ne 0 ]; then
+            echo "[Warn] The access request has been rejected: $adventure"
             continue
          fi
 
-         # [2] Release this strategy in emergence
+         # Release this strategy in emergency
          numIpFamily=$(python3 ${WORKING_DIRECTORY}/network-utilities.py --get-ip-family $dstHost | grep -oE '4|6')
          iptablesPrefix=$(if [ $numIpFamily -eq 4 ]; then echo iptables; elif [ $numIpFamily -eq 6 ]; then echo ip6tables; fi)
          ipsetSuffix="$([ $numIpFamily -eq 6 ] && echo 'family inet6')"
          ipsetName="allow_$dstHost:$dstPort"
 
-         if $(ipset list $ipsetName 1>/dev/null 2>/dev/null); then
-            # ipset already exists
-            ipsetFull="ipset add $ipsetName $srcHost"
-            eval "$ipsetFull"
-            echo "$ipsetFull" >> ${WORKING_DIRECTORY}/.unknown-adventure
-         else
-            # ipset not exists
-            # [Note] There is a special situation: during the packet capture process, a certain exposed port always has no traffic, and its ipset and iptables allow strategies will not be initialized when the iptables all script is executed (Due to performance considerations, for exposed surfaces without traffic, only blocking is performed without initializing the allow ipset and iptables strategies). However, after the exposed port is blocked, the port suddenly experiences traffic, which may be due to the launch of new services, the activation of backup ports and even the strategies is in serious expiration. Therefore, it is necessary to temporarily initialize the ipset and iptables allow strategies. The strategy change script needs to be reviewed before it can be forcibly remembered (written to the .legacy-connections table)
-            ipsetFull="ipset create $ipsetName hash:ip $ipsetSuffix"
-            eval "$ipsetFull"
-            echo "$ipsetFull" >> ${WORKING_DIRECTORY}/.unknown-adventure
+         # [Note] There is a special situation: during the packet capture process, a certain exposed port always has no traffic, and its ipset and iptables allow strategies will not be initialized when the iptables all script is executed (Due to performance considerations, for exposed surfaces without traffic, only blocking is performed without initializing the allow ipset and iptables strategies). However, after the exposed port is blocked, the port suddenly experiences traffic, which may be due to the launch of new services, the activation of backup ports and even the strategies is in serious expiration. Therefore, it is necessary to temporarily initialize the ipset and iptables allow strategies. The strategy change script needs to be reviewed before it can be forcibly remembered (written to the .legacy-connections table)
+         ipset create $ipsetName hash:ip $ipsetSuffix 2>/dev/null
+         ipset add $ipsetName $srcHost 2>/dev/null
 
-            ipsetFull="ipset add $ipsetName $srcHost"
-            eval "$ipsetFull"
-            echo "$ipsetFull" >> ${WORKING_DIRECTORY}/.unknown-adventure
-            
-            iptablesFull="
-               $iptablesPrefix -t raw -C PREROUTING -d $dstHost -p $protocol -m set --match-set $ipsetName src -m $protocol --dport $dstPort -m comment --comment \"Unified Access Control\" -j ACCEPT || \\
-               $iptablesPrefix -t raw -I PREROUTING -d $dstHost -p $protocol -m set --match-set $ipsetName src -m $protocol --dport $dstPort -m comment --comment \"Unified Access Control\" -j ACCEPT
-            "
-            eval "$iptablesFull"
-            echo "$iptablesFull" | sed 's#^[ ]*##g' >> ${WORKING_DIRECTORY}/.unknown-adventure
-         fi
+         iptablesFull="
+            $iptablesPrefix -t raw -C PREROUTING -d $dstHost -p $protocol -m set --match-set $ipsetName src -m $protocol --dport $dstPort -m comment --comment \"Unified Access Control\" -j ACCEPT || \\
+            $iptablesPrefix -t raw -I PREROUTING -d $dstHost -p $protocol -m set --match-set $ipsetName src -m $protocol --dport $dstPort -m comment --comment \"Unified Access Control\" -j ACCEPT
+         "
+         eval "$iptablesFull"
+
+         echo "[Info] The access request has been accepted: $adventure"
+
+         echo "$adventure" >> ${WORKING_DIRECTORY}/.unknown-adventure
          
          # [Note] After passing the security audit, we need to enforce the memory of this strategy to avoid forgetting (based on the frequency of packet occurrence, there is still a high probability that the packet will not be captured in the next capture), but theoretically, the frequency of packet occurrence is proportional to its importance, which also means that it has the ability to retry multiple times
       fi
@@ -2893,6 +2885,9 @@ reset_iptables_traffic_meter() {
    iptables -t $tableName -Z $linkName $lineNumber
 }
 
+#
+# [Note] Show iptables traffic gauges
+#
 show_iptables_traffic_meter() {
 
    local tableName=$1
@@ -2903,6 +2898,123 @@ show_iptables_traffic_meter() {
    [ -z "$linkName" ] && linkName='PREROUTING'
 
    clear && iptables -t $tableName -L $linkName $lineNumber -nv --line-number | grep 'Unified Access Control'
+}
+
+#
+# [Note] Save current effective strategies to hidden files
+#
+save_effective_strategies() {
+
+   TIMESTAMP="$(date +%y%m%d%H%M)"
+
+   >${WORKING_DIRECTORY}/.ipset-effective-${TIMESTAMP}
+
+   for i in $(iptables -t raw -S PREROUTING -w | grep 'Unified Access Control' | grep '\--match-set' | sed 's#.*--match-set \([^ ]*\).*#\1#g' | sort -u); do
+      ipset save $i >> ${WORKING_DIRECTORY}/.ipset-effective-${TIMESTAMP}
+      echo >> ${WORKING_DIRECTORY}/.ipset-effective-${TIMESTAMP}
+   done
+
+   # The file link always points to the file with the latest timestamp
+   ln -sf ${WORKING_DIRECTORY}/.ipset-effective-${TIMESTAMP} ${WORKING_DIRECTORY}/.ipset-effective
+
+   echo "[Info] All effective ipsets have been saved in ${WORKING_DIRECTORY}/.ipset-effective"
+
+   # ipset restore < ${WORKING_DIRECTORY}/.ipset-effective-${TIMESTAMP}
+   # iptables -t raw -F
+   iptables -t raw -S PREROUTING -w | grep 'Unified Access Control' > ${WORKING_DIRECTORY}/.iptables-effective-${TIMESTAMP}
+
+   ln -sf ${WORKING_DIRECTORY}/.iptables-effective-${TIMESTAMP} ${WORKING_DIRECTORY}/.iptables-effective
+
+   echo "[Info] All effective ipsets have been saved in ${WORKING_DIRECTORY}/.ipset-effective"
+}
+
+#
+# [Note] Apply iptables strategies
+#
+apply_effective_strategies() {
+
+   ipset restore -! < ${WORKING_DIRECTORY}/.ipset-effective
+   
+   # iptables-apply -t raw ${WORKING_DIRECTORY}/.iptables-effective
+
+   # Remove all effective strategies
+   for i in $(iptables -t raw -L PREROUTING -n --line-number | grep 'Unified Access Control' | awk '{print $1}' | sort -nr); do
+      iptables -t raw -D PREROUTING $i
+   done
+
+   sed 's#^#iptables -t raw #g' ${WORKING_DIRECTORY}/.iptables-effective
+}
+
+#
+# [Note] Compress and optimize effective strategies
+#
+optimize_effective_strategies() {
+   
+   grep -vE '^$|^create' ${WORKING_DIRECTORY}/.ipset-effective | sed 's#^add ##g' | group_by_1st_column_no_limit | awk '{print $2,$1}' | group_by_1st_column_no_limit > ${WORKING_DIRECTORY}/.ipset-effective-compress
+
+
+}
+
+convert_iptables_strategies_to_nftables() {
+   :
+}
+
+#
+# [Note] Generate DNAT strategies from hidden file .dnat-connections. The file format is:
+# [
+#   {"SRC_HOST":"****","DST_HOST":"****","DST_PORT":"****","DNAT_HOST":"****","DNAT_PORT":"****","PROTOCOL":"TCP4","COMMENT":"Somebody's Cloud Desk"}, ...
+# ]
+#
+generate_dnat_strategies() {
+
+   local scriptPath=${WORKING_DIRECTORY}/.dnat-script
+
+   [ ! -f ${WORKING_DIRECTORY}/.dnat-connections ] && return
+
+   overwrite_shell_script_header $scriptPath
+   
+   for j in $(jq -r -c '
+      group_by(.DST_HOST + "_" + .DST_PORT + "_" + .DNAT_HOST + "_" + .DNAT_PORT + "_" + .PROTOCOL) | 
+      map({
+      DST_HOST: .[0].DST_HOST,
+      DST_PORT: .[0].DST_PORT,
+      DNAT_HOST: .[0].DNAT_HOST,
+      DNAT_PORT: .[0].DNAT_PORT,
+      PROTOCOL: .[0].PROTOCOL,
+      SRC_HOSTS: (map(.SRC_HOST) | join(","))
+      })
+   ' ${WORKING_DIRECTORY}/.dnat-connections | jq -r -c '.[]'); do
+
+      protocol=$(echo "$j" | jq -r -c '.PROTOCOL' | tr [:upper:] [:lower:])
+      protoName=$(echo "$protocol" | grep -oE 'tcp|udp')
+      ipFamily=$(echo "$protocol" | grep -oE '4|6')
+      ipsetSuffix="$([ $ipFamily -eq 6 ] && echo 'family inet6')"
+      iptablesPrefix=$(if [ $ipFamily -eq 4 ]; then echo iptables; elif [ $ipFamily -eq 6 ]; then echo ip6tables; fi)
+      ipsetName=$(echo "$j" | jq -r -c '"allow_" + .DST_HOST + ":" + .DST_PORT')
+      dstHost=$(echo "$j" | jq -r -c '.DST_HOST')
+      dstPort=$(echo "$j" | jq -r -c '.DST_PORT')
+      dnatHost=$(echo "$j" | jq -r -c '.DNAT_HOST')
+      dnatPort=$(echo "$j" | jq -r -c '.DNAT_PORT')
+
+      echo >> $scriptPath
+      if $(ipset list $ipsetName 1>/dev/null 2>/dev/null); then
+         echo "ipset flush $ipsetName" >> $scriptPath
+      else
+         echo "ipset create $ipsetName hash:net $ipsetSuffix" >> $scriptPath
+      fi
+
+      echo 'echo "' >> $scriptPath
+      echo "$j" | jq -r -c '.SRC_HOSTS' | tr ',' '\n' | sed "s#^#   add $ipsetName #g" >> $scriptPath
+      echo '" | ipset restore' >> $scriptPath
+
+      echo >> $scriptPath
+      echo "$iptablesPrefix -t nat -C PREROUTING -p $protoName -m $protoName --dport $dstPort -d $dstHost -m set --match-set $ipsetName src -m comment --comment "${IPTABLES_COMMENT}" -j DNAT --to-destination $dnatHost:$dnatPort || \\" >> $scriptPath
+      echo "$iptablesPrefix -t nat -I PREROUTING -p $protoName -m $protoName --dport $dstPort -d $dstHost -m set --match-set $ipsetName src -m comment --comment "${IPTABLES_COMMENT}" -j DNAT --to-destination $dnatHost:$dnatPort || \\" >> $scriptPath
+   done
+
+   sed -i '/^$/N;/^\n$/D' $scriptPath
+
+   echo "[Info] The DNAT strategies have been saved in $scriptPath"
 }
 
 orderedPara=(
@@ -2931,6 +3043,7 @@ orderedPara=(
    "--start-iptables-rejections-observer"
    "--reset-iptables-traffic-meter"
    "--show-iptables-traffic-meter"
+   "--save-effective-strategies"
    "--usage"
    "--help"
    "--manual"
@@ -2965,6 +3078,7 @@ declare -A mapParaFunc=(
    ["--start-iptables-rejections-observer"]="start_iptables_rejections_observer"
    ["--reset-iptables-traffic-meter"]="reset_iptables_traffic_meter"
    ["--show-iptables-traffic-meter"]="show_iptables_traffic_meter"
+   ["--save-effective-strategies"]="save_effective_strategies"
    ["--usage"]="usage"
    ["--help"]="usage"
    ["--manual"]="usage"
@@ -2999,6 +3113,7 @@ declare -A mapParaSpec=(
    ["--start-iptables-rejections-observer"]="Start a daemon for iptables rejections observe."
    ["--reset-iptables-traffic-meter"]="Reset the iptables traffic gauge."
    ["--show-iptables-traffic-meter"]="Show the iptables traffic gauge."
+   ["--save-effective-strategies"]="Save effective strategies."
    ["--usage"]="Simplified operation manual."
    ["--help"]="Simplified operation manual."
    ["--manual"]="Simplified operation manual."
