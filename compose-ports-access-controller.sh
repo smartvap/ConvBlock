@@ -263,19 +263,33 @@ load_docker_subnet_addresses_from_file() {
    DOCKER_NETWORK_SUBNETS_IPV6=($(cat ${WORKING_DIRECTORY}/.docker-networks-ipv6 2>/dev/null))
 }
 
+load_service_cidr_from_file() {
+
+   if [ ! -f ${WORKING_DIRECTORY}/.service-cidr ] || [[ "${*}" =~ "--no-cache" ]]; then
+      ${WORKING_DIRECTORY}/network-utilities.sh --dump-service-cidr-from-service-list
+   fi
+
+   SERVICE_CIDR=($(cat ${WORKING_DIRECTORY}/.service-cidr 2>/dev/null))
+   SERVICE_CIDR_IPV4=($(cat ${WORKING_DIRECTORY}/.service-cidr-ipv4 2>/dev/null))
+   SERVICE_CIDR_IPV6=($(cat ${WORKING_DIRECTORY}/.service-cidr-ipv6 2>/dev/null))
+}
+
 #
 # [Note] Allow interconnections between containers sharing the current docker-compose defined network, this is preventive strategy, when the host initiates a strong protection policy based on a wildcard address (such as denying any to any access), ensures that containers sharing the current compose network can access each other. Specifically, a trusted subnet or IP should include: the bridge used by docker-compose, the loopback network of the operating system, and the default routing IP address of the host.
 #
 allow_access_between_compose_containers() {
 
    local i=
+   local scriptPath=
+   local ipsetNameIPv4=
+   local ipsetNameIPv6=
 
    # Retrieve static docker-compose subnet data
    COMPOSE_CIDRS=($(yq r ${WORKING_DIRECTORY}/docker-compose.yml networks[*].ipam.config[*].ip_range))
    COMPOSE_IPV4_CIDRS=()
    COMPOSE_IPV6_CIDRS=()
 
-   for i in ${CONTAINER_CIDRS[@]}; do
+   for i in ${COMPOSE_CIDRS[@]}; do
       local ipFamily=$(python3 ${WORKING_DIRECTORY}/network-utilities.py --get-ip-family "$i")
       if [ "$ipFamily" == "IPv4" ]; then
          COMPOSE_IPV4_CIDRS=(${COMPOSE_IPV4_CIDRS[@]} $i)
@@ -290,10 +304,13 @@ allow_access_between_compose_containers() {
    # Compulsory acquisition of all docker bridge networks
    load_docker_subnet_addresses_from_file --no-cache
 
-   # Merge into trusted CIDRs
-   TRUST_IPV4_CIDRS=(${COMPOSE_IPV4_CIDRS[@]} ${DEFAULT_IPV4_ROUTE_ADDRESSES[@]} ${DOCKER_NETWORK_SUBNETS_IPV4[@]} ${LOOPBACK_SUBNETS_IPV4})
+   # Compulsory acquisition of K8s service CIDR
+   load_service_cidr_from_file --no-cache
 
-   TRUST_IPV6_CIDRS=(${COMPOSE_IPV6_CIDRS[@]} ${DEFAULT_IPV6_ROUTE_ADDRESSES[@]} ${DOCKER_NETWORK_SUBNETS_IPV6[@]} ${LOOPBACK_SUBNETS_IPV6})
+   # Merge into trusted CIDRs
+   TRUST_IPV4_CIDRS=(${COMPOSE_IPV4_CIDRS[@]} ${DEFAULT_IPV4_ROUTE_ADDRESSES[@]} ${DOCKER_NETWORK_SUBNETS_IPV4[@]} ${LOOPBACK_SUBNETS_IPV4} ${SERVICE_CIDR_IPV4[@]})
+
+   TRUST_IPV6_CIDRS=(${COMPOSE_IPV6_CIDRS[@]} ${DEFAULT_IPV6_ROUTE_ADDRESSES[@]} ${DOCKER_NETWORK_SUBNETS_IPV6[@]} ${LOOPBACK_SUBNETS_IPV6} ${SERVICE_CIDR_IPV6[@]})
 
    # Remove duplicates
    TRUST_IPV4_CIDRS=($(echo ${TRUST_IPV4_CIDRS[@]} | tr ' ' '\n' | sort -u))
@@ -303,50 +320,56 @@ allow_access_between_compose_containers() {
 
    # [Note] Distinguish between trusted network policies and protective policies to avoid affecting trusted network policies during maintenance operations on protective policies
    local iptablesComment="${PROJECT_NAME} Trust Access Control"
+   scriptPath="${WORKING_DIRECTORY}/.${PROJECT_NAME}-preventive-allow-script"
 
-   overwrite_shell_script_header ${WORKING_DIRECTORY}/.${PROJECT_NAME}-preventive-allow-script
+   overwrite_shell_script_header $scriptPath
 
-   # Add and remove existing iptables scripts, otherwise ipset will be locked and cannot be deleted or rebuilt
-   # echo >> ${WORKING_DIRECTORY}/.${PROJECT_NAME}-preventive-allow-script
-   # echo "for i in \$(iptables -t raw -L PREROUTING -n --line-number | grep \"$iptablesComment\" | awk '{print \$1}' | sort -nr); do" >> ${WORKING_DIRECTORY}/.${PROJECT_NAME}-preventive-allow-script
-   # echo "   iptables -t raw -D PREROUTING \$i" >> ${WORKING_DIRECTORY}/.${PROJECT_NAME}-preventive-allow-script
-   # echo "done" >> ${WORKING_DIRECTORY}/.${PROJECT_NAME}-preventive-allow-script
+   # Load the name of ipset from docker-compose.yml
+   ipsetNameIPv4=$(yq r ${WORKING_DIRECTORY}/docker-compose.yml services.${PROJECT_NAME}.labels.TRUST_IPV4_SUBNETS_IPSET_NAME)
+   ipsetNameIPv6=$(yq r ${WORKING_DIRECTORY}/docker-compose.yml services.${PROJECT_NAME}.labels.TRUST_IPV4_SUBNETS_IPSET_NAME)
 
-   # echo >> ${WORKING_DIRECTORY}/.${PROJECT_NAME}-preventive-allow-script
-   # echo "for i in \$(ip6tables -t raw -L PREROUTING -n --line-number | grep \"$iptablesComment\" | awk '{print \$1}' | sort -nr); do" >> ${WORKING_DIRECTORY}/.${PROJECT_NAME}-preventive-allow-script
-   # echo "   ip6tables -t raw -D PREROUTING \$i" >> ${WORKING_DIRECTORY}/.${PROJECT_NAME}-preventive-allow-script
-   # echo "done" >> ${WORKING_DIRECTORY}/.${PROJECT_NAME}-preventive-allow-script
+   if [ -z "$ipsetNameIPv4" ]; then
+      # To ensure the uniqueness of the ipset name and not exceed a length of 31 characters, a random string is used
+      ipsetNameIPv4=$(< /dev/urandom tr -dc 'a-zA-Z0-9' | head -c 16)
+      yq w -i ${WORKING_DIRECTORY}/docker-compose.yml services.${PROJECT_NAME}.labels.TRUST_IPV4_SUBNETS_IPSET_NAME "$ipsetNameIPv4"
+   fi
 
-   echo >> ${WORKING_DIRECTORY}/.${PROJECT_NAME}-preventive-allow-script
-   # echo "ipset destroy ${PROJECT_NAME}-trust-ipv4-subnets" >> ${WORKING_DIRECTORY}/.${PROJECT_NAME}-preventive-allow-script
-   # echo "ipset destroy ${PROJECT_NAME}-trust-ipv6-subnets" >> ${WORKING_DIRECTORY}/.${PROJECT_NAME}-preventive-allow-script
-   echo "ipset create ${PROJECT_NAME}-trust-ipv4-subnets hash:net 2>/dev/null" >> ${WORKING_DIRECTORY}/.${PROJECT_NAME}-preventive-allow-script
-   echo "ipset create ${PROJECT_NAME}-trust-ipv6-subnets hash:net family inet6 2>/dev/null" >> ${WORKING_DIRECTORY}/.${PROJECT_NAME}-preventive-allow-script
+   if [ -z "$ipsetNameIPv6" ]; then
+      ipsetNameIPv6=$(< /dev/urandom tr -dc 'a-zA-Z0-9' | head -c 16)
+      yq w -i ${WORKING_DIRECTORY}/docker-compose.yml services.${PROJECT_NAME}.labels.TRUST_IPV6_SUBNETS_IPSET_NAME "$ipsetNameIPv6"
+   fi
+
+   echo >> $scriptPath
+   echo "ipset create $ipsetNameIPv4 hash:net 2>/dev/null" >> $scriptPath
+   echo "ipset create $ipsetNameIPv6 hash:net family inet6 2>/dev/null" >> $scriptPath
    
-
    echo >> ${WORKING_DIRECTORY}/.${PROJECT_NAME}-preventive-allow-script
-   for i in ${TRUST_IPV4_CIDRS[@]}; do
-      echo "ipset add ${PROJECT_NAME}-trust-ipv4-subnets $i" >> ${WORKING_DIRECTORY}/.${PROJECT_NAME}-preventive-allow-script
-   done
+   echo "ipset flush $ipsetNameIPv4" >> $scriptPath
+   echo "ipset flush $ipsetNameIPv6" >> $scriptPath
 
-   echo >> ${WORKING_DIRECTORY}/.${PROJECT_NAME}-preventive-allow-script
-   for i in ${TRUST_IPV6_CIDRS[@]}; do
-      echo "ipset add ${PROJECT_NAME}-trust-ipv6-subnets $i" >> ${WORKING_DIRECTORY}/.${PROJECT_NAME}-preventive-allow-script
-   done
+   echo >> $scriptPath
+   echo 'echo "' >> $scriptPath
+   echo "${TRUST_IPV4_CIDRS[@]}" | tr ' ' '\n' | sed "s#^#   add $ipsetNameIPv4 #g" >> $scriptPath
+   echo '" | ipset restore' >> $scriptPath
+
+   echo >> $scriptPath
+   echo 'echo "' >> $scriptPath
+   echo "${TRUST_IPV6_CIDRS[@]}" | tr ' ' '\n' | sed "s#^#   add $ipsetNameIPv6 #g" >> $scriptPath
+   echo '" | ipset restore' >> $scriptPath
 
    # Communications in TCP4/UDP4
-   echo >> ${WORKING_DIRECTORY}/.${PROJECT_NAME}-preventive-allow-script
-   echo "iptables -t raw -C PREROUTING -m set --match-set ${PROJECT_NAME}-trust-ipv4-subnets src -m set --match-set ${PROJECT_NAME}-trust-ipv4-subnets dst -m comment --comment \"$iptablesComment\" -j ACCEPT || \\" >> ${WORKING_DIRECTORY}/.${PROJECT_NAME}-preventive-allow-script
-   echo "iptables -t raw -I PREROUTING -m set --match-set ${PROJECT_NAME}-trust-ipv4-subnets src -m set --match-set ${PROJECT_NAME}-trust-ipv4-subnets dst -m comment --comment \"$iptablesComment\" -j ACCEPT" >> ${WORKING_DIRECTORY}/.${PROJECT_NAME}-preventive-allow-script
+   echo >> $scriptPath
+   echo "iptables -t raw -C PREROUTING -m set --match-set $ipsetNameIPv4 src -m set --match-set $ipsetNameIPv4 dst -m comment --comment \"$iptablesComment\" -j ACCEPT || \\" >> $scriptPath
+   echo "iptables -t raw -I PREROUTING -m set --match-set $ipsetNameIPv4 src -m set --match-set $ipsetNameIPv4 dst -m comment --comment \"$iptablesComment\" -j ACCEPT" >> $scriptPath
 
    # Communications in TCP6/UDP6
    echo >> ${WORKING_DIRECTORY}/.${PROJECT_NAME}-preventive-allow-script
-   echo "ip6tables -t raw -C PREROUTING -m set --match-set ${PROJECT_NAME}-trust-ipv6-subnets src -m set --match-set ${PROJECT_NAME}-trust-ipv6-subnets dst -m comment --comment \"$iptablesComment\" -j ACCEPT || \\" >> ${WORKING_DIRECTORY}/.${PROJECT_NAME}-preventive-allow-script
-   echo "ip6tables -t raw -I PREROUTING -m set --match-set ${PROJECT_NAME}-trust-ipv6-subnets src -m set --match-set ${PROJECT_NAME}-trust-ipv6-subnets dst -m comment --comment \"$iptablesComment\" -j ACCEPT" >> ${WORKING_DIRECTORY}/.${PROJECT_NAME}-preventive-allow-script
+   echo "ip6tables -t raw -C PREROUTING -m set --match-set $ipsetNameIPv6 src -m set --match-set $ipsetNameIPv6 dst -m comment --comment \"$iptablesComment\" -j ACCEPT || \\" >> $scriptPath
+   echo "ip6tables -t raw -I PREROUTING -m set --match-set $ipsetNameIPv6 src -m set --match-set $ipsetNameIPv6 dst -m comment --comment \"$iptablesComment\" -j ACCEPT" >> $scriptPath
 
-   sed -i '/^$/N;/^\n$/D' ${WORKING_DIRECTORY}/.${PROJECT_NAME}-preventive-allow-script
+   sed -i '/^$/N;/^\n$/D' $scriptPath
 
-   echo "[Info] The preventive iptables allow rules have been saved in ${WORKING_DIRECTORY}/.${PROJECT_NAME}-preventive-allow-script"
+   echo "[Info] The preventive iptables allow rules have been saved in $scriptPath"
 }
 
 #

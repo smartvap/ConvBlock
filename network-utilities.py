@@ -341,7 +341,7 @@ Examples:
          print("Error: At least one IP address is required", file=sys.stderr)
          return 1
       
-      ip_address = args.get_ip_family[0]
+      ip_address = args.get_ip_family[0].strip("[]")
 
       try:
          result = get_ip_family(ip_address)

@@ -51,6 +51,7 @@
 # [31] 注释需要同时从DNAT表和监听表中提取，若kube-proxy暴露的，直接从监听表提取。SSH Port Forwarding Policies 没取到。
 # [32] DNAT Connections Protections, using .dnat-connections with ipset, to protect some ports
 # [33] When the exposed listening port is randomly assigned as the source port of the session (TCP session initiator), the SYN+ACK returned by the destination end will be intercepted, and the probability of occurrence will increase as the number of host listening ports increases. Therefore, the compromise solution is: the iptables REJECT strategy only intercepts SYN inbound packets to avoid establishing a three-way handshake connection, but the existing problems are: 1) invalid for UDP sessions; 2) Invalid against flood attacks such as SYN+ACK.
+# [34] In some cases, the ip_det * module does not activate automatically and requires manual activation. [Done]
 
 #########################################
 # Verifications                         #
@@ -116,6 +117,12 @@ if [ -z "$(which bc 2>/dev/null)" ]; then
    echo '[Warn] bc is not installed yet.'
    exit -1
 fi
+
+# [Note] In some cases, the ip_set* module does not activate automatically and requires manual activation.
+( modprobe -a ip_set ip_set_hash_net ip_set_hash_ip ip_set_hash_ipport xt_set xt_comment xt_iprange xt_multiport xt_LOG ) || {
+   echo '[Warn] The current kernel does not fully support the required ip_set* and xt_* modules.'
+   exit -1
+}
 
 #########################################
 # Global Variables Setting Area         #
@@ -941,7 +948,7 @@ get_comments_of_dnat_exposure() {
 }
 
 #
-# [Note] Single process processing of iptables port forwarding policies dump file specified by parameter 1. The starting and ending lines of the next two parameters indicate the scope of the processed file content.
+# [Note] Processing DNAT exposed surface data within a specified range will generate two hidden files: 1. A temporary DNAT exposed surface data file containing source, destination addresses, ports, and comments for the final destination of the jump; 2. The DNAT exposed surface data comes with a linked list file, which can be used to generate a perspective view of the DNAT exposed surface for tracking jump chains in the DNAT strategy.
 #
 process_dnat_exposures() {
 
@@ -950,6 +957,7 @@ process_dnat_exposures() {
    local endLineNo=$3
    local IFS=$'\n'
    local temporaryFilePath="$filePath.tmp"
+   local chainsFilePath="$filePath-chains"
    local k=
 
    if [ -z "$filePath" ] || [ -z "$beginLineNo" ] || [ -z "$endLineNo" ]; then
@@ -963,6 +971,7 @@ process_dnat_exposures() {
       local destination=$(echo "$k" | awk -F';' '{print $2}')
       local ports=$(echo "$k" | awk -F';' '{print $3}')
       local to=$(echo "$k" | awk -F';' '{print $4}')
+      local chainName="$to"
 
       # Filter: The policies jump to *MARK* links will be ignored
       if [[ "$to" =~ "MARK" ]]; then
@@ -993,6 +1002,7 @@ process_dnat_exposures() {
       local port=
       for port in $(echo "$ports" | tr ',' '\n'); do
          echo "$source;$destination;$port;$to" >> $temporaryFilePath
+         echo "$source;$destination;$port;$chainName" >> $chainsFilePath
       done
    done
 }
@@ -1155,12 +1165,12 @@ show_dnat_exposures_perspective() {
    local i=
    local linkName=
 
-   if [ -f ${WORKING_DIRECTORY}/.tcp4-dnat-exposures ]; then
+   if [ -f ${WORKING_DIRECTORY}/.tcp4-dnat-exposures-chains ]; then
       if [ -f ${WORKING_DIRECTORY}/.tcp4-dnat-exposures-perspective ] && [ -s ${WORKING_DIRECTORY}/.tcp4-dnat-exposures-perspective ]; then
          cat ${WORKING_DIRECTORY}/.tcp4-dnat-exposures-perspective
       else
          local j=1
-         for i in $(cat ${WORKING_DIRECTORY}/.tcp4-dnat-exposures); do
+         for i in $(cat ${WORKING_DIRECTORY}/.tcp4-dnat-exposures-chains); do
             echo "[$j] $i" | tee -a ${WORKING_DIRECTORY}/.tcp4-dnat-exposures-perspective
             j=$(expr $j + 1)
             linkName=$(echo "$i" | awk -F';' '{print $NF}')
@@ -1169,12 +1179,12 @@ show_dnat_exposures_perspective() {
       fi
    fi
 
-   if [ -f ${WORKING_DIRECTORY}/.udp4-dnat-exposures ]; then
+   if [ -f ${WORKING_DIRECTORY}/.udp4-dnat-exposures-chains ]; then
       if [ -f ${WORKING_DIRECTORY}/.udp4-dnat-exposures-perspective ] && [ -s ${WORKING_DIRECTORY}/.udp4-dnat-exposures-perspective ]; then
          cat ${WORKING_DIRECTORY}/.udp4-dnat-exposures-perspective
       else
          local j=1
-         for i in $(cat ${WORKING_DIRECTORY}/.udp4-dnat-exposures); do
+         for i in $(cat ${WORKING_DIRECTORY}/.udp4-dnat-exposures-chains); do
             echo "[$j] $i" | tee -a ${WORKING_DIRECTORY}/.udp4-dnat-exposures-perspective
             j=$(expr $j + 1)
             linkName=$(echo "$i" | awk -F';' '{print $NF}')
@@ -1183,12 +1193,12 @@ show_dnat_exposures_perspective() {
       fi
    fi
 
-   if [ -f ${WORKING_DIRECTORY}/.tcp6-dnat-exposures ]; then
+   if [ -f ${WORKING_DIRECTORY}/.tcp6-dnat-exposures-chains ]; then
       if [ -f ${WORKING_DIRECTORY}/.tcp6-dnat-exposures-perspective ] && [ -s ${WORKING_DIRECTORY}/.tcp6-dnat-exposures-perspective ]; then
          cat ${WORKING_DIRECTORY}/.tcp6-dnat-exposures-perspective
       else
          local j=1
-         for i in $(cat ${WORKING_DIRECTORY}/.tcp6-dnat-exposures); do
+         for i in $(cat ${WORKING_DIRECTORY}/.tcp6-dnat-exposures-chains); do
             echo "[$j] $i" | tee -a ${WORKING_DIRECTORY}/.tcp6-dnat-exposures-perspective
             j=$(expr $j + 1)
             linkName=$(echo "$i" | awk -F';' '{print $NF}')
@@ -1197,12 +1207,12 @@ show_dnat_exposures_perspective() {
       fi
    fi
 
-   if [ -f ${WORKING_DIRECTORY}/.udp6-dnat-exposures ]; then
+   if [ -f ${WORKING_DIRECTORY}/.udp6-dnat-exposures-chains ]; then
       if [ -f ${WORKING_DIRECTORY}/.udp6-dnat-exposures-perspective ] && [ -s ${WORKING_DIRECTORY}/.udp6-dnat-exposures-perspective ]; then
          cat ${WORKING_DIRECTORY}/.udp6-dnat-exposures-perspective
       else
          local j=1
-         for i in $(cat ${WORKING_DIRECTORY}/.udp6-dnat-exposures); do
+         for i in $(cat ${WORKING_DIRECTORY}/.udp6-dnat-exposures-chains); do
             echo "[$j] $i" | tee -a ${WORKING_DIRECTORY}/.udp6-dnat-exposures-perspective
             j=$(expr $j + 1)
             linkName=$(echo "$i" | awk -F';' '{print $NF}')
