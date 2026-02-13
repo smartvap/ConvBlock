@@ -52,6 +52,10 @@
 # [32] DNAT Connections Protections, using .dnat-connections with ipset, to protect some ports
 # [33] When the exposed listening port is randomly assigned as the source port of the session (TCP session initiator), the SYN+ACK returned by the destination end will be intercepted, and the probability of occurrence will increase as the number of host listening ports increases. Therefore, the compromise solution is: the iptables REJECT strategy only intercepts SYN inbound packets to avoid establishing a three-way handshake connection, but the existing problems are: 1) invalid for UDP sessions; 2) Invalid against flood attacks such as SYN+ACK.
 # [34] In some cases, the ip_det * module does not activate automatically and requires manual activation. [Done]
+# [35] .legacy-connections 读脏问题
+# [36] 一键运行简化操作
+# [37] 增加特权地址转换表 .legacy-nats，允许对特定端口进行 DNATS后访问，格式为：134.80.92.98,134.80.135.2:65522,134.80.135.2:22，根据被转换到的目的IP确定是否添加SNATS
+# [38] 提供windows版本的封堵方法，tcpdump for windows
 
 #########################################
 # Verifications                         #
@@ -63,7 +67,6 @@
 # Patch the deploy
 # kubectl patch deploy beegrid-chat-service -n beegrid --type='json' -p='[{"op": "replace", "path": "/spec/template/spec/containers/0/ports", "value": [{"containerPort": 7007, "hostPort": 57007, "protocol": "TCP"}]}]'
 # kubectl get pod -n beegrid -o wide | grep '^beegrid-chat-service'
-
 
 #########################################
 # Environment variable setting area     #
@@ -261,7 +264,7 @@ IPTABLES_COMMENT='Unified Access Control'
 
 load_external_interfaces_from_file() {
 
-   if [ ! -f ${WORKING_DIRECTORY}/.external-interfaces ]; then
+   if [ ! -f ${WORKING_DIRECTORY}/.external-interfaces ] || [[ "${*}" =~ "--no-cache" ]]; then
       ${WORKING_DIRECTORY}/network-utilities.sh --get-external-interfaces
    fi
 
@@ -274,7 +277,7 @@ load_external_interfaces_from_file() {
 
 load_external_ip_addresses_from_file() {
 
-   if [ ! -f ${WORKING_DIRECTORY}/.external-ip ]; then
+   if [ ! -f ${WORKING_DIRECTORY}/.external-ip ] || [[ "${*}" =~ "--no-cache" ]]; then
       ${WORKING_DIRECTORY}/network-utilities.sh --get-external-ip-addresses
    fi
 
@@ -307,7 +310,7 @@ load_docker_subnet_addresses_from_file() {
 
 load_cluster_cidr_from_file() {
 
-   if [ ! -f ${WORKING_DIRECTORY}/.cluster-cidr ]; then
+   if [ ! -f ${WORKING_DIRECTORY}/.cluster-cidr ] || [[ "${*}" =~ "--no-cache" ]]; then
       ${WORKING_DIRECTORY}/network-utilities.sh --get-cluster-cidr
    fi
 
@@ -318,7 +321,7 @@ load_cluster_cidr_from_file() {
 
 load_service_cidr_from_file() {
 
-   if [ ! -f ${WORKING_DIRECTORY}/.service-cidr ]; then
+   if [ ! -f ${WORKING_DIRECTORY}/.service-cidr ] || [[ "${*}" =~ "--no-cache" ]]; then
       ${WORKING_DIRECTORY}/network-utilities.sh --dump-service-cidr-from-service-list
    fi
 
@@ -329,7 +332,7 @@ load_service_cidr_from_file() {
 
 load_kvm_subnet_addresses_from_file() {
 
-   if [ ! -f ${WORKING_DIRECTORY}/.kvm-networks ]; then
+   if [ ! -f ${WORKING_DIRECTORY}/.kvm-networks ] || [[ "${*}" =~ "--no-cache" ]]; then
       ${WORKING_DIRECTORY}/network-utilities.sh --get-kvm-subnet-addresses
    fi
 
@@ -340,7 +343,7 @@ load_kvm_subnet_addresses_from_file() {
 
 load_vmware_subnet_addresses_from_file() {
 
-   if [ ! -f ${WORKING_DIRECTORY}/.vmware-networks ]; then
+   if [ ! -f ${WORKING_DIRECTORY}/.vmware-networks ] || [[ "${*}" =~ "--no-cache" ]]; then
       ${WORKING_DIRECTORY}/network-utilities.sh --get-vmware-subnet-addresses
    fi
 
@@ -351,7 +354,7 @@ load_vmware_subnet_addresses_from_file() {
 
 load_k8s_nodes_ip_addresses_from_file() {
 
-   if [ ! -f ${WORKING_DIRECTORY}/.k8s-nodes ]; then
+   if [ ! -f ${WORKING_DIRECTORY}/.k8s-nodes ] || [[ "${*}" =~ "--no-cache" ]]; then
       ${WORKING_DIRECTORY}/network-utilities.sh --get-k8s-nodes-ip-addresses
    fi
 
@@ -1088,15 +1091,15 @@ concurrent_process_dnat_exposures() {
 
    dump_dnat_strategy_tables
 
-   abstract_concurrent_process "process_dnat_exposures" "${WORKING_DIRECTORY}/.tcp4-dnat-exposures"
-   abstract_concurrent_process "process_dnat_exposures" "${WORKING_DIRECTORY}/.udp4-dnat-exposures"
-   abstract_concurrent_process "process_dnat_exposures" "${WORKING_DIRECTORY}/.tcp6-dnat-exposures"
-   abstract_concurrent_process "process_dnat_exposures" "${WORKING_DIRECTORY}/.udp6-dnat-exposures"
+   [ -f ${WORKING_DIRECTORY}/.tcp4-dnat-exposures ] && abstract_concurrent_process "process_dnat_exposures" "${WORKING_DIRECTORY}/.tcp4-dnat-exposures"
+   [ -f ${WORKING_DIRECTORY}/.udp4-dnat-exposures ] && abstract_concurrent_process "process_dnat_exposures" "${WORKING_DIRECTORY}/.udp4-dnat-exposures"
+   [ -f ${WORKING_DIRECTORY}/.tcp6-dnat-exposures ] && abstract_concurrent_process "process_dnat_exposures" "${WORKING_DIRECTORY}/.tcp6-dnat-exposures"
+   [ -f ${WORKING_DIRECTORY}/.udp6-dnat-exposures ] && abstract_concurrent_process "process_dnat_exposures" "${WORKING_DIRECTORY}/.udp6-dnat-exposures"
 
-   writeback_temporary_file "${WORKING_DIRECTORY}/.tcp4-dnat-exposures"
-   writeback_temporary_file "${WORKING_DIRECTORY}/.udp4-dnat-exposures"
-   writeback_temporary_file "${WORKING_DIRECTORY}/.tcp6-dnat-exposures"
-   writeback_temporary_file "${WORKING_DIRECTORY}/.udp6-dnat-exposures"
+   [ -f ${WORKING_DIRECTORY}/.tcp4-dnat-exposures ] && writeback_temporary_file "${WORKING_DIRECTORY}/.tcp4-dnat-exposures"
+   [ -f ${WORKING_DIRECTORY}/.udp4-dnat-exposures ] && writeback_temporary_file "${WORKING_DIRECTORY}/.udp4-dnat-exposures"
+   [ -f ${WORKING_DIRECTORY}/.tcp6-dnat-exposures ] && writeback_temporary_file "${WORKING_DIRECTORY}/.tcp6-dnat-exposures"
+   [ -f ${WORKING_DIRECTORY}/.udp6-dnat-exposures ] && writeback_temporary_file "${WORKING_DIRECTORY}/.udp6-dnat-exposures"
 }
 
 #

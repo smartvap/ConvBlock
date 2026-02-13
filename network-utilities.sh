@@ -58,6 +58,10 @@ LOOPBACK_SUBNETS_IPV6=::1/128
 #
 PREFER_IPV6=false
 
+LEGACY_SSHD_ORIGINAL_PORT=22
+
+MAX_JOBS=36
+
 #########################################
 # Prerequisites                         #
 #########################################
@@ -94,6 +98,20 @@ deliver() {
    ssh -p $sshPort $sshServer "mkdir -p $remoteFolder"
 
    scp -o ConnectTimeout=5 -P $sshPort -rp $localFile $sshServer:$remoteFolder 2>/dev/null
+}
+
+load_k8s_nodes_ip_addresses_from_file() {
+
+   if [ ! -f ${WORKING_DIRECTORY}/.k8s-nodes ] || [[ "${*}" =~ "--no-cache" ]]; then
+      ${WORKING_DIRECTORY}/network-utilities.sh --get-k8s-nodes-ip-addresses
+   fi
+
+   K8S_NODES_IP_ADDRESSES=($(cat ${WORKING_DIRECTORY}/.k8s-nodes 2>/dev/null))
+   K8S_NODES_IPV4_ADDRESSES=($(cat ${WORKING_DIRECTORY}/.k8s-nodes-ipv4 2>/dev/null))
+   K8S_NODES_IPV6_ADDRESSES=($(cat ${WORKING_DIRECTORY}/.k8s-nodes-ipv6 2>/dev/null))
+   K8S_NODES_SUBNETS=($(cat ${WORKING_DIRECTORY}/.k8s-nodes-subnets 2>/dev/null))
+   K8S_NODES_IPV4_SUBNETS=($(cat ${WORKING_DIRECTORY}/.k8s-nodes-ipv4-subnets 2>/dev/null))
+   K8S_NODES_IPV6_SUBNETS=($(cat ${WORKING_DIRECTORY}/.k8s-nodes-ipv6-subnets 2>/dev/null))
 }
 
 #
@@ -816,6 +834,16 @@ get_service_cidr() {
    fi
 }
 
+deliver_k8s_nodes_ip_addresses() {
+
+   [ -f ${WORKING_DIRECTORY}/.k8s-nodes ] && batch_remote_deliver ${WORKING_DIRECTORY}/.k8s-nodes
+   [ -f ${WORKING_DIRECTORY}/.k8s-nodes-ipv4 ] && batch_remote_deliver ${WORKING_DIRECTORY}/.k8s-nodes-ipv4
+   [ -f ${WORKING_DIRECTORY}/.k8s-nodes-ipv6 ] && batch_remote_deliver ${WORKING_DIRECTORY}/.k8s-nodes-ipv6
+   [ -f ${WORKING_DIRECTORY}/.k8s-nodes-subnets ] && batch_remote_deliver ${WORKING_DIRECTORY}/.k8s-nodes-subnets
+   [ -f ${WORKING_DIRECTORY}/.k8s-nodes-ipv4-subnets ] && batch_remote_deliver ${WORKING_DIRECTORY}/.k8s-nodes-ipv4-subnets
+   [ -f ${WORKING_DIRECTORY}/.k8s-nodes-ipv6-subnets ] && batch_remote_deliver ${WORKING_DIRECTORY}/.k8s-nodes-ipv6-subnets
+}
+
 #
 # [Note] K8s cluster level methods.
 #
@@ -859,6 +887,8 @@ get_k8s_nodes_ip_addresses() {
       K8S_NODES_SUBNETS=($(python3 ${WORKING_DIRECTORY}/iprange3.py --to-subnets "${K8S_NODES_IP_ADDRESSES[@]}" | tr ' ' '\n'))
       echo ${K8S_NODES_SUBNETS[@]} | tr ' ' '\n' > ${WORKING_DIRECTORY}/.k8s-nodes-subnets
    fi
+
+   deliver_k8s_nodes_ip_addresses
 }
 
 #
